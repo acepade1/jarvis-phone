@@ -41,3 +41,9 @@
 - 화면을 켜 두고 충전기를 꽂아 두세요. 화면이 꺼지면 마이크가 멈춥니다.
 - 박수 모드와 음성 호출어 모드는 마이크를 번갈아 씁니다. 박수로 깨운 뒤 20초 동안 대화하고, 조용해지면 다시 잠듭니다.
 - 인터넷 검색은 무료 서비스(Jina Reader, DuckDuckGo)를 거치며 분당 약 20회 제한이 있습니다.
+
+## APK (안드로이드 앱 파일)
+- 직접 받기: https://github.com/acepade1/jarvis-phone/releases/latest/download/jarvis.apk
+- 설치할 때 "출처를 알 수 없는 앱 설치 허용"을 켜야 할 수 있습니다.
+- GitHub Actions(`.github/workflows/apk.yml`)가 자동으로 빌드합니다. 빌드할 때마다 서명 키가 새로 만들어져서, 새 APK를 설치하려면 기존 앱을 지우고 다시 설치해야 합니다.
+- 이 APK는 웹앱(Chrome 기반)을 앱 아이콘으로 여는 방식입니다. 인터넷과 Chrome이 필요합니다.
