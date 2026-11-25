@@ -17,6 +17,7 @@
    | `JARVIS_PASSWORD` | 앱에 로그인할 **내 비밀번호** (직접 정함, 길게) |
    | `GEMINI_API_KEY` | https://aistudio.google.com/apikey 에서 무료 발급 (카드 불필요) |
    | `GROQ_API_KEY` | (선택) https://console.groq.com 무료. 있으면 더 빠르고, Gemini가 막힐 때 대신 답함 |
+| `OPENROUTER_API_KEY` | (선택) https://openrouter.ai/keys 에서 무료 발급 (구글/GitHub 로그인, 카드 불필요). 키는 `sk-or-v1-`로 시작. **무료(`:free`) 모델만** 씁니다. Groq가 막힐 때 대신 답함 |
    | 나머지 | 비워 둬도 됨 |
 3. **Apply** → 3~5분 기다리면 `https://jarvis-xxxx.onrender.com` 주소가 생깁니다.
 4. 앱을 열고 ⚙ 설정 → **서버 주소**에 그 주소, **비밀번호**에 위 비밀번호를 넣고 `연결 · 로그인`.
@@ -33,6 +34,13 @@ Groq 무료 플랜(`openai/gpt-oss-120b` 등 기준): **분당 30회 · 분당 8
 - 분당 8천 토큰 한도 때문에 검색을 1분에 2번 이상 하면 잠깐 막힐 수 있습니다. 서버가 4초 기다렸다가 한 번 다시 시도합니다.
 - `llama-3.3-70b`는 Groq 무료 플랜에서 빠져서(Enterprise 전용) 쓰지 않습니다. 기본은 `gpt-oss-120b`이고, 막혀 있으면 `gpt-oss-20b` → `qwen3.8-27b` 순으로 자동 전환합니다. Render 환경변수 `GROQ_MODEL`로 직접 고를 수도 있습니다.
 - 정확한 한도는 Groq 콘솔의 Limits 화면에서 확인하세요. 아래 숫자는 문서 기준 추정입니다.
+
+### OpenRouter (무료 모델) — Groq 대신/함께
+- 키를 넣으면 서버가 OpenRouter의 **무료(`:free`) 모델 목록을 직접 읽어서** 쓸 수 있는 모델을 고릅니다 (모델 이름이 자주 바뀌기 때문). 기본은 `google/gemma-4-31b-it:free` → `gemma-4-26b` → `openrouter/free` 순입니다.
+- 모델이 막히거나(429), 스트림 도중 오류가 나거나, 빈 응답이 오면 **다음 무료 모델로 자동 전환**합니다 (최대 3개). 유료 모델은 절대 쓰지 않습니다.
+- 무료 모델은 모델마다 분당·하루 요청 한도가 있고, 크레딧을 구매한 적이 있으면 한도가 더 높습니다. 정확한 숫자는 openrouter.ai 대시보드에서 확인하세요. (이 README의 숫자는 확인한 것만 적었습니다)
+- 환경변수 `OPENROUTER_MODEL`로 선호 모델을 지정할 수 있습니다.
+- AI 우선순위: Gemini → Groq → OpenRouter (빠른 응답이 필요한 도구 결과 요약은 Groq 먼저). 유료 AI는 항상 마지막이며 허락이 있어야 합니다.
 
 ### 유료 AI(Claude · ChatGPT)는 허락받고만 써요
 - `ANTHROPIC_API_KEY`(Claude)나 `OPENAI_API_KEY`(ChatGPT)를 넣어도 **평소에는 쓰지 않습니다.** 무료 AI(Gemini·Groq)만 씁니다.

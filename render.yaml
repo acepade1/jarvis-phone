@@ -17,6 +17,8 @@ services:
         sync: false
       - key: GROQ_API_KEY        # console.groq.com 무료 (선택)
         sync: false
+      - key: OPENROUTER_API_KEY  # openrouter.ai 무료 모델용 (선택, 무료)
+        sync: false
       - key: OPENAI_API_KEY      # 선택 (유료 - 허락받고 쓸 때만 사용)
         sync: false
       - key: ANTHROPIC_API_KEY   # 선택 (유료 - 허락받고 쓸 때만 사용)

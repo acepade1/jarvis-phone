@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import os
 
 import httpx
@@ -15,9 +16,13 @@ for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
 
 from server import ai, main, tools  # noqa: E402
 
-CALLS = {"gemini": 0, "groq": 0, "claude": 0, "forecast": 0}
+CALLS = {"gemini": 0, "groq": 0, "claude": 0, "openrouter": 0, "forecast": 0}
 CAPTURE = []   # groq 로 간 요청 본문들
-SCRIPT = {"gemini": [], "groq": []}  # 호출 순서대로 돌려줄 응답 (문자열 or ("err", status, msg))
+SCRIPT = {"gemini": [], "groq": [], "openrouter": []}
+OR_CAPTURE = []   # openrouter 로 간 요청 (본문, 헤더)
+OR_IDS = ["nvidia/nemotron-3.5-super-vl:free", "google/gemma-4-31b-it:free", "liquid/lfm-3-1.7b:free",
+          "google/gemma-4-26b-a4b-it:free", "openrouter/free", "nvidia/nemotron-3.5-lightning:free", "google/lyria-3-pro-preview"]
+OR_LIST_FAIL = {"on": False}  # 호출 순서대로 돌려줄 응답 (문자열 or ("err", status, msg))
 
 
 def _chunks(text):
@@ -46,6 +51,21 @@ def sse_claude(text):
 
 def handler(request: httpx.Request):
     url = str(request.url)
+    if "openrouter.ai/api/v1/models" in url:
+        if OR_LIST_FAIL["on"]:
+            return httpx.Response(500, text="down")
+        return httpx.Response(200, json={"data": [{"id": i} for i in OR_IDS]})
+    if "openrouter.ai/api/v1/chat/completions" in url:
+        CALLS["openrouter"] += 1
+        OR_CAPTURE.append({"body": json.loads(request.content), "headers": dict(request.headers)})
+        item = SCRIPT["openrouter"].pop(0) if SCRIPT["openrouter"] else "오픈라우터 기본 응답이에요."
+        if isinstance(item, tuple):
+            return httpx.Response(item[1], json={"error": {"message": item[2] if len(item) > 2 else "error"}})
+        nl = chr(10)
+        if isinstance(item, dict):   # 200 으로 시작한 뒤 스트림 도중 오류
+            err = "data: " + json.dumps({"error": {"code": 429, "message": "rate limited upstream"}}) + nl + nl
+            return httpx.Response(200, content=err.encode(), headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, content=sse_openai(item).encode(), headers={"content-type": "text/event-stream"})
     if "api.anthropic.com" in url:
         CALLS["claude"] += 1
         return httpx.Response(200, content=sse_claude("클로드가 답했어요.").encode(), headers={"content-type": "text/event-stream"})
@@ -83,6 +103,10 @@ def setup():
     SCRIPT["groq"].clear()
     ai._paid_count.update(day="", n=0)
     ai._groq_ok["model"] = None
+    ai._or_cache.update(t=0.0, models=None)
+    OR_CAPTURE.clear()
+    OR_LIST_FAIL["on"] = False
+    SCRIPT["openrouter"].clear()
     CAPTURE.clear()
     yield
     ai._transport = None
@@ -476,3 +500,93 @@ def test_single_provider_429_twice_gives_error(client, monkeypatch):
     SCRIPT["groq"] += [("err", 429, "rate limit"), ("err", 429, "rate limit")]
     ev = events(client, login(client), chat_body("안녕"))
     assert ev[-1]["t"] == "error" and CALLS["groq"] == 2
+
+
+# ---------------- OpenRouter (무료 모델) ----------------
+@pytest.fixture
+def only_openrouter(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-TEST")
+
+
+def test_openrouter_listed_in_health_and_is_free(client, only_openrouter):
+    assert "OpenRouter" in client.get("/api/health").json()["providers"]
+    assert "openrouter" not in ai.PAID
+    assert ai.chain(False) == ["openrouter"]
+
+
+def test_openrouter_only_answers_with_free_gemma_first(client, only_openrouter):
+    SCRIPT["openrouter"].append("오픈라우터가 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "오픈라우터가 답했어요."
+    req = OR_CAPTURE[0]
+    assert req["body"]["model"] == "google/gemma-4-31b-it:free"
+    assert req["body"]["model"].endswith(":free"), "유료 모델은 절대 쓰지 않음"
+    assert req["headers"]["authorization"] == "Bearer sk-or-v1-TEST"
+    assert req["headers"]["x-title"] == "Jarvis" and req["body"]["max_tokens"] >= 800
+
+
+def test_openrouter_switches_model_on_error(client, only_openrouter):
+    SCRIPT["openrouter"].append(("err", 429, "rate limited"))
+    SCRIPT["openrouter"].append("다음 모델이 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "다음 모델이 답했어요."
+    assert [c["body"]["model"] for c in OR_CAPTURE] == ["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free"]
+
+
+def test_openrouter_midstream_error_switches_model(client, only_openrouter):
+    SCRIPT["openrouter"].append({"midstream": True})
+    SCRIPT["openrouter"].append("복구해서 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "복구해서 답했어요." and len(OR_CAPTURE) == 2
+
+
+def test_openrouter_empty_reply_switches_model(client, only_openrouter):
+    SCRIPT["openrouter"].append("")
+    SCRIPT["openrouter"].append("두 번째 모델 답이에요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "두 번째 모델 답이에요." and len(OR_CAPTURE) == 2
+
+
+def test_openrouter_gives_up_after_three_models(client, only_openrouter):
+    SCRIPT["openrouter"] += [("err", 500, "x"), ("err", 500, "x"), ("err", 500, "x"), "도달하면 안 됨"]
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["t"] == "error" and len(OR_CAPTURE) == 3
+
+
+def test_openrouter_candidates_skip_vision_and_media_models(client, only_openrouter):
+    ms = asyncio.run(ai.or_candidates())
+    assert ms[:3] == ["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free", "openrouter/free"]
+    assert not any(re.search(r"vl|lyria|lfm", m) for m in ms)
+    assert "nvidia/nemotron-3.5-lightning:free" in ms and len(ms) <= 5
+
+
+def test_openrouter_static_fallback_when_list_unreadable(client, only_openrouter):
+    OR_LIST_FAIL["on"] = True
+    assert asyncio.run(ai.or_candidates()) == ai.OR_STATIC
+
+
+def test_openrouter_model_env_override(client, only_openrouter, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_MODEL", "nvidia/nemotron-3.5-lightning:free")
+    assert asyncio.run(ai.or_candidates())[0] == "nvidia/nemotron-3.5-lightning:free"
+
+
+def test_groq_failure_falls_back_to_openrouter(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-TEST")
+    monkeypatch.setattr(main, "RETRY_429_WAIT", 0)
+    SCRIPT["groq"].append(("err", 500, "boom"))
+    SCRIPT["openrouter"].append("그록이 막혀서 오픈라우터가 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "그록이 막혀서 오픈라우터가 답했어요." and CALLS["groq"] == 1
+
+
+def test_openrouter_does_not_unlock_paid(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-TEST")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST")
+    SCRIPT["openrouter"].append("무료로 답해요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "무료로 답해요." and CALLS["claude"] == 0

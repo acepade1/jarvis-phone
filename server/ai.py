@@ -1,6 +1,7 @@
 """AI 공급자 연결: 키 자동 배정, 스트리밍, 실패 시 다음 AI로 전환(쿨다운 포함)."""
 import json
 import os
+import re
 import time
 
 import httpx
@@ -10,14 +11,16 @@ DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-120b",   # llama-3.3-70b 는 Groq 무료 플랜에서 빠짐(Enterprise 전용)
     "openai": "gpt-4o-mini",
     "claude": "claude-haiku-5-5",
+    "openrouter": "google/gemma-4-31b-it:free",
 }
 ENV_KEYS = {
     "gemini": "GEMINI_API_KEY",
     "groq": "GROQ_API_KEY",
     "openai": "OPENAI_API_KEY",
     "claude": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
 }
-NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "ChatGPT", "claude": "Claude"}
+NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "ChatGPT", "claude": "Claude", "openrouter": "OpenRouter"}
 # 돈이 드는 AI 는 사용자의 허락이 있을 때만 쓴다 (무료 AI 가 모두 막혔을 때 묻거나, 사용자가 직접 지목했을 때)
 PAID = {"openai", "claude"}
 
@@ -90,7 +93,8 @@ def paid_available() -> list[str]:
 
 def chain(fast: bool = False, allow_paid: bool = False, prefer: str | None = None) -> list[str]:
     keys = available()
-    order = ["groq", "gemini", "openai", "claude"] if fast else ["gemini", "groq", "openai", "claude"]
+    order = (["groq", "gemini", "openrouter", "openai", "claude"] if fast
+             else ["gemini", "groq", "openrouter", "openai", "claude"])
     allp = [p for p in order if p in keys and (allow_paid or p not in PAID)]
     if prefer in allp:  # 사용자가 "클로드로" 처럼 지목하면 그 AI 를 먼저
         allp.remove(prefer)
@@ -132,6 +136,37 @@ async def _fail(resp: httpx.Response) -> ProviderError:
     return ProviderError(resp.status_code, msg or "오류")
 
 
+# ---- OpenRouter: 무료(:free) 모델은 자주 바뀌므로 목록을 읽어서 고른다 ----
+OR_STATIC = ["google/gemma-4-31b-it:free", "google/gemma-4-26b-a4b-it:free", "openrouter/free"]
+OR_SKIP = re.compile(r"vl|omni|lyria|lfm|image|audio|embed|guard", re.I)   # 글 대화에 안 맞는 모델 제외
+_or_cache: dict = {"t": 0.0, "models": None}
+
+
+async def or_candidates() -> list[str]:
+    now = time.time()
+    if _or_cache["models"] and now - _or_cache["t"] < 3600:
+        return _or_cache["models"]
+    ids: list[str] = []
+    try:
+        async with client(timeout=10) as c:
+            r = await c.get("https://openrouter.ai/api/v1/models")
+            ids = [m["id"] for m in r.json().get("data", [])
+                   if str(m.get("id", "")).endswith(":free") or m.get("id") == "openrouter/free"]
+    except Exception:  # noqa: BLE001
+        ids = []
+    pref = os.environ.get("OPENROUTER_MODEL", "").strip()
+    ordered: list[str] = []
+    for m in ([pref] if pref else []) + OR_STATIC:
+        if m and m not in ordered and (not ids or m in ids or m == pref):
+            ordered.append(m)
+    for m in ids:
+        if m not in ordered and not OR_SKIP.search(m):
+            ordered.append(m)
+    ordered = ordered[:5] or list(OR_STATIC)
+    _or_cache.update(t=now if ids else now - 3300, models=ordered)   # 목록을 못 읽었으면 5분 뒤 다시 시도
+    return ordered
+
+
 def groq_extra(model: str) -> dict:
     """추론(reasoning) 모델은 생각에 쓰는 토큰이 한도를 먹으므로 최소로 줄인다."""
     env = os.environ.get("GROQ_REASONING", "").strip()
@@ -144,6 +179,25 @@ def groq_extra(model: str) -> dict:
 
 async def stream(prov: str, system: str, messages: list[dict], max_tokens: int = 400):
     """텍스트 조각을 하나씩 내보내는 비동기 제너레이터. (Groq 는 모델이 막혀 있으면 다음 모델로)"""
+    if prov == "openrouter":
+        models = (await or_candidates())[:3]
+        last_err: ProviderError | None = None
+        for m in models:
+            got = False
+            try:
+                async for ch in _stream(prov, system, messages, max_tokens, m):
+                    got = True
+                    yield ch
+                if got:
+                    return
+                last_err = ProviderError(502, "빈 응답")      # 내용이 없으면 다음 모델로
+            except ProviderError as e:
+                if got:
+                    raise
+                last_err = e                                 # 모델별로 한도/오류가 다르니 다음 모델로
+        if last_err:
+            raise last_err
+        return
     if prov != "groq":
         async for ch in _stream(prov, system, messages, max_tokens, model_for(prov)):
             yield ch
@@ -191,24 +245,34 @@ async def _stream(prov: str, system: str, messages: list[dict], max_tokens: int,
                     for p in parts:
                         if p.get("text"):
                             yield p["text"]
-        elif prov in ("groq", "openai"):
-            url = (
-                "https://api.groq.com/openai/v1/chat/completions"
-                if prov == "groq"
-                else "https://api.openai.com/v1/chat/completions"
-            )
+        elif prov in ("groq", "openai", "openrouter"):
+            urls = {"groq": "https://api.groq.com/openai/v1/chat/completions",
+                    "openai": "https://api.openai.com/v1/chat/completions",
+                    "openrouter": "https://openrouter.ai/api/v1/chat/completions"}
             body = {
                 "model": model,
                 "stream": True,
-                "max_completion_tokens": max(max_tokens, 800) if prov == "groq" else max_tokens,
                 "messages": [{"role": "system", "content": system}, *messages],
             }
+            if prov == "openrouter":
+                body["max_tokens"] = max(max_tokens, 800)
+            else:
+                body["max_completion_tokens"] = max(max_tokens, 800) if prov == "groq" else max_tokens
             if prov == "groq":
                 body.update(groq_extra(model))
-            async with c.stream("POST", url, json=body, headers={"Authorization": f"Bearer {key}"}) as r:
+            hdr = {"Authorization": f"Bearer {key}"}
+            if prov == "openrouter":   # 선택 사항: 사용처 표시 (비밀 아님)
+                hdr.update({"HTTP-Referer": "https://github.com/acepade1/jarvis-phone", "X-Title": "Jarvis"})
+            async with c.stream("POST", urls[prov], json=body, headers=hdr) as r:
                 if r.status_code != 200:
                     raise await _fail(r)
                 async for j in _sse(r):
+                    if isinstance(j.get("error"), dict):    # 스트림 도중 오류 (200 으로 시작한 뒤)
+                        try:
+                            code = int(j["error"].get("code") or 502)
+                        except (TypeError, ValueError):
+                            code = 502
+                        raise ProviderError(code, str(j["error"].get("message") or "error"))
                     d = ((j.get("choices") or [{}])[0].get("delta")) or {}
                     if d.get("content"):
                         yield d["content"]

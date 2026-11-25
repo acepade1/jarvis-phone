@@ -187,7 +187,7 @@ h4{margin:14px 0 6px;color:var(--accent)}
   <p style="margin:0 0 8px;font-size:13px;color:var(--dim);line-height:1.5">💳 돈이 드는 AI(Claude·ChatGPT)는 <b style="color:var(--fg)">허락을 받은 뒤에만</b> 써요. 무료 AI가 막히면 물어보고, "클로드로 해줘"라고 직접 말하면 그때 써요. 하루 30회까지만 써요.</p>
   <p style="margin:0 0 8px;font-size:13px;color:var(--dim);line-height:1.6"><b style="color:var(--fg)">1분이면 끝나요</b> (카드·결제 필요 없음)<br>① 아래 <b>🔑 무료 키 받기</b> → 구글 로그인 → "API 키 만들기" → 키 복사<br>② 이 화면으로 돌아오면 <b>자동으로 입력</b>돼요 (안 되면 📋 붙여넣기)</p>
   <label>API 키 — 여러 개 넣어도 돼요 (한 줄에 하나). 종류는 자비스가 알아서 알아보고 상황에 맞게 배정하고, 막히면 다음 AI로 넘어가요. 이 폰에만 저장돼요.</label>
-  <textarea id="keys" rows="4" placeholder="AIza... (Gemini)&#10;gsk_... (Groq)&#10;sk-... (ChatGPT)&#10;sk-ant-... (Claude)" autocomplete="off" spellcheck="false"></textarea>
+  <textarea id="keys" rows="4" placeholder="AIza... (Gemini)&#10;gsk_... (Groq)&#10;sk-or-... (OpenRouter)&#10;sk-... (ChatGPT)&#10;sk-ant-... (Claude)" autocomplete="off" spellcheck="false"></textarea>
   <small id="kinfo"></small>
   <div style="display:flex;gap:8px;margin:-4px 0 12px">
     <a class="card" style="flex:1;justify-content:center" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">🔑 무료 키 받기</a>
@@ -241,15 +241,17 @@ h4{margin:14px 0 6px;color:var(--accent)}
 'use strict';
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const DEF={gemini:'gemini-2.5-flash',openai:'gpt-4o-mini',groq:'openai/gpt-oss-120b',claude:'claude-haiku-5-5'};   // llama-3.3-70b 는 Groq 무료 플랜에서 빠짐
+const DEF={gemini:'gemini-2.5-flash',openai:'gpt-4o-mini',groq:'openai/gpt-oss-120b',claude:'claude-haiku-5-5',openrouter:'google/gemma-4-31b-it:free'};   // llama-3.3-70b 는 Groq 무료 플랜에서 빠짐
 const GROQ_ALTS=['openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.8-27b'];
 const groqExtra=m=>m.startsWith('openai/gpt-oss')?{reasoning_effort:'low'}:m.startsWith('qwen/')?{reasoning_effort:'none'}:{};
 let groqOk=null;
+const ORT_ALTS=['google/gemma-4-31b-it:free','google/gemma-4-26b-a4b-it:free','openrouter/free'];
+let ortOk=null;
 let S={};try{S=JSON.parse(localStorage.getItem('jarvis')||'{}')}catch(_){}
 const cfg=Object.assign({work:'show',server:'',token:'',perf:'auto',keys:'',wake:'자비스',owner:'',city:'부산 해운대구',ytKey:'',tgToken:'',tgOwner:'',mode:'speech'},S);
 if(!cfg.keys)cfg.keys=[S.key,S.fbKey].filter(Boolean).join('\n');   // 예전 설정 이전
-const NAMES={gemini:'Gemini',groq:'Groq',openai:'ChatGPT',claude:'Claude'};
-const detect=k=>/^AIza/.test(k)?'gemini':/^gsk_/.test(k)?'groq':/^sk-ant-/.test(k)?'claude':/^sk-/.test(k)?'openai':null;
+const NAMES={gemini:'Gemini',groq:'Groq',openai:'ChatGPT',claude:'Claude',openrouter:'OpenRouter'};
+const detect=k=>/^AIza/.test(k)?'gemini':/^gsk_/.test(k)?'groq':/^sk-ant-/.test(k)?'claude':/^sk-or-/.test(k)?'openrouter':/^sk-/.test(k)?'openai':null;
 function keyMap(){const m={};String(cfg.keys||'').split(/[\s,;]+/).filter(Boolean).forEach(k=>{const p=detect(k);if(p&&!m[p])m[p]=k});return m}
 const hasKeys=()=>Object.keys(keyMap()).length>0;
 const cool={};                                   // 막힌 AI는 잠시 건너뜀
@@ -260,7 +262,7 @@ function paidBudgetOk(){try{const d=new Date().toISOString().slice(0,10),r=JSON.
 function countPaid(){try{const d=new Date().toISOString().slice(0,10),r=JSON.parse(localStorage.getItem('jarvis_paid')||'{}');localStorage.setItem('jarvis_paid',JSON.stringify({d,n:(r.d===d?r.n:0)+1}))}catch(_){}}
 const needApproval=()=>{const e=new Error('approval');e.approval=true;return e};
 function chain(fast,allowPaid,prefer){
- const m=keyMap(),order=fast?['groq','gemini','openai','claude']:['gemini','groq','openai','claude'];
+ const m=keyMap(),order=fast?['groq','gemini','openrouter','openai','claude']:['gemini','groq','openrouter','openai','claude'];
  const all=order.filter(p=>m[p]&&(allowPaid||!PAID.includes(p))).map(p=>({prov:p,key:m[p],model:DEF[p]}));
  const i=prefer?all.findIndex(x=>x.prov===prefer):-1;if(i>0)all.unshift(all.splice(i,1)[0]);
  const ok=all.filter(x=>!(cool[x.prov]>Date.now()));
@@ -594,18 +596,25 @@ async function sse(r,cb){
   buf+=dec.decode(value,{stream:true});
   let i;while((i=buf.indexOf('\n'))>=0){
    const line=buf.slice(0,i).trim();buf=buf.slice(i+1);
-   if(line.startsWith('data:')){const d=line.slice(5).trim();if(d&&d!=='[DONE]'){try{cb(JSON.parse(d))}catch(_){}}}
+   if(line.startsWith('data:')){const d=line.slice(5).trim();if(d&&d!=='[DONE]'){let j;try{j=JSON.parse(d)}catch(_){continue}cb(j)}}
   }
  }
 }
 async function errText(r){try{const j=await r.json();return (j.error&&j.error.message)||JSON.stringify(j).slice(0,200)}catch(_){return String(r.status)}}
 async function callProv(prov,key,model,onDelta){
- if(prov!=='groq')return callOne(prov,key,model,onDelta);
- const list=[...new Set([groqOk,model,...GROQ_ALTS].filter(Boolean))];
+ if(prov!=='groq'&&prov!=='openrouter')return callOne(prov,key,model,onDelta);
+ const isOr=prov==='openrouter';
+ const list=[...new Set([isOr?ortOk:groqOk,model,...(isOr?ORT_ALTS:GROQ_ALTS)].filter(Boolean))].slice(0,isOr?3:4);
  for(let i=0;i<list.length;i++){
   let got=false;
-  try{await callOne(prov,key,list[i],d=>{got=true;onDelta(d)});groqOk=list[i];return}
-  catch(e){if(got||!/model/i.test(e.message||'')||i===list.length-1)throw e}   // 모델이 막혀 있으면 다음 모델로
+  try{
+   await callOne(prov,key,list[i],d=>{got=true;onDelta(d)});
+   if(isOr&&!got)throw new Error('빈 응답');                    // 내용이 없으면 다음 모델로
+   if(isOr)ortOk=list[i];else groqOk=list[i];return;
+  }catch(e){
+   // Groq: 모델이 막혔을 때만 다음 모델로 / OpenRouter: 무료 모델은 모델마다 한도가 달라서 어떤 오류든 다음 모델로
+   if(got||i===list.length-1||(!isOr&&!/model/i.test(e.message||'')))throw e;
+  }
  }
 }
 async function callOne(prov,key,model,onDelta){
@@ -623,12 +632,12 @@ async function callOne(prov,key,model,onDelta){
      contents:history.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]})),generationConfig:gc})});
    if(!r.ok)throw new Error(await errText(r));
    await sse(r,j=>{const p=j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;if(p)p.forEach(x=>x.text&&got(x.text))});
-  }else if(prov==='openai'||prov==='groq'){
-   const url=prov==='groq'?'https://api.groq.com/openai/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
-   r=await fetch(url,{method:'POST',signal:ac.signal,headers:{'content-type':'application/json',authorization:'Bearer '+key},
-    body:JSON.stringify(Object.assign({model,stream:true,max_completion_tokens:prov==='groq'?800:400,messages:[{role:'system',content:sys},...history]},prov==='groq'?groqExtra(model):{}))});
+  }else if(prov==='openai'||prov==='groq'||prov==='openrouter'){
+   const url=prov==='groq'?'https://api.groq.com/openai/v1/chat/completions':prov==='openrouter'?'https://openrouter.ai/api/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
+   r=await fetch(url,{method:'POST',signal:ac.signal,headers:Object.assign({'content-type':'application/json',authorization:'Bearer '+key},prov==='openrouter'?{'X-Title':'Jarvis'}:{}),
+    body:JSON.stringify(Object.assign({model,stream:true,messages:[{role:'system',content:sys},...history]},prov==='openrouter'?{max_tokens:800}:{max_completion_tokens:prov==='groq'?800:400},prov==='groq'?groqExtra(model):{}))});
    if(!r.ok)throw new Error(await errText(r));
-   await sse(r,j=>{const d=j.choices&&j.choices[0]&&j.choices[0].delta;if(d&&d.content)got(d.content)});
+   await sse(r,j=>{if(j.error)throw new Error(j.error.message||'오류');const d=j.choices&&j.choices[0]&&j.choices[0].delta;if(d&&d.content)got(d.content)});
   }else{
    r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',signal:ac.signal,headers:{
     'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
