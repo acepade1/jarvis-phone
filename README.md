@@ -12,8 +12,7 @@
 ## 2. 설정 (⚙)
 | 항목 | 설명 |
 |---|---|
-| AI 종류 / API 키 | Gemini 무료 키: aistudio.google.com |
-| 예비 Groq 키 | console.groq.com (무료). 위 AI가 한도/오류면 자동 전환 |
+| API 키 (자동 배정) | 키를 여러 개 넣으면 종류(Gemini/Groq/ChatGPT/Claude)를 자동으로 알아보고 상황에 맞게 배정, 막히면 다음 AI로 자동 전환. 설정의 "🔑 무료 키 받기" → 키 복사 → 돌아오면 자동 입력 |
 | 대기 방식 | 음성 호출어("자비스", "헤이 자비스") 또는 박수 두 번 |
 | 기본 위치 | 기본값 부산 해운대구 |
 | YouTube Data API 키 (선택) | 있으면 유튜브 검색이 가장 안정적. console.cloud.google.com → YouTube Data API v3 사용 설정 → 키 생성 |
