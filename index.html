@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#050b14">
+<link rel="manifest" href="manifest.json">
+<title>자비스</title>
+<style>
+:root{--bg:#050b14;--fg:#d6ecff;--accent:#3ac8ff;--dim:#6a8499;--card:#0d1b2a;--line:#1b3550}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif}
+body{display:flex;flex-direction:column;align-items:center;padding:env(safe-area-inset-top) 16px env(safe-area-inset-bottom)}
+#clock{font-size:clamp(40px,14vw,72px);font-weight:200;margin-top:14px;letter-spacing:2px}
+#date{color:var(--dim);margin-bottom:4px}
+#orb{width:120px;height:120px;border-radius:50%;margin:10px 0 6px;background:radial-gradient(circle at 35% 30%,#bff0ff,var(--accent) 45%,#0a3b66);box-shadow:0 0 40px #3ac8ff66;transition:.3s;opacity:.35;cursor:pointer}
+#orb.on{opacity:.8;animation:pulse 3s ease-in-out infinite}
+#orb.listen{opacity:1;animation:pulse 1s ease-in-out infinite}
+#orb.think{background:radial-gradient(circle at 35% 30%,#fff3bf,#ffb13a 45%,#6a3b0a);box-shadow:0 0 40px #ffb13a88;animation:pulse .6s infinite}
+#orb.talk{animation:pulse .5s ease-in-out infinite;box-shadow:0 0 70px #3ac8ffcc}
+@keyframes pulse{50%{transform:scale(1.08)}}
+#status{color:var(--dim);min-height:1.4em;margin-bottom:6px;text-align:center;font-size:14px}
+#player{display:none;width:100%;max-width:560px;margin-bottom:8px}
+#player.show{display:block}
+#player .frame{position:relative;padding-top:56.25%;border-radius:12px;overflow:hidden;background:#000}
+#player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+#player .row{display:flex;gap:8px;margin-top:6px}
+#log{flex:1;width:100%;max-width:560px;overflow:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0;min-height:80px}
+.m{padding:10px 14px;border-radius:14px;max-width:88%;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.u{align-self:flex-end;background:#12304d}
+.a{align-self:flex-start;background:var(--card);border:1px solid var(--line)}
+.t{align-self:flex-start;color:var(--dim);font-size:13px}
+.card{align-self:stretch;display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:14px;background:#10283f;border:1px solid var(--accent);color:var(--fg);text-decoration:none}
+.card b{flex:1;word-break:break-all}
+form{display:flex;gap:8px;width:100%;max-width:560px;margin:8px 0}
+input,select{background:var(--card);border:1px solid var(--line);color:var(--fg);padding:12px;border-radius:12px;font-size:16px}
+form input{flex:1}
+button{background:var(--accent);color:#03121f;border:0;border-radius:12px;padding:12px 16px;font-size:16px;font-weight:600}
+button.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line)}
+#bar{display:flex;gap:8px;width:100%;max-width:560px;margin-bottom:10px}
+#bar button{flex:1}
+dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:16px;width:min(92vw,440px);max-height:90vh;overflow:auto}
+dialog input,dialog select{width:100%;margin:4px 0 12px}
+label{font-size:13px;color:var(--dim)}
+small{color:var(--dim);display:block;margin:-8px 0 12px;font-size:12px}
+h4{margin:14px 0 6px;color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="clock">--:--</div>
+<div id="date"></div>
+<div id="orb" title="탭하면 말/영상 멈춤"></div>
+<div id="status">시작 버튼을 눌러 주세요</div>
+<div id="player"><div class="frame"></div><div class="row"><button class="ghost" id="pp">⏯ 일시정지/재생</button><button class="ghost" id="pc">✕ 닫기</button></div></div>
+<div id="log"></div>
+<form id="f"><input id="t" placeholder="텍스트로 말 걸기…" autocomplete="off"><button>전송</button></form>
+<div id="bar">
+  <button id="go">▶ 시작</button>
+  <button id="cfg" class="ghost">⚙ 설정</button>
+</div>
+
+<dialog id="dlg">
+  <h3 style="margin-top:0">설정</h3>
+
+  <h4>AI</h4>
+  <label>AI 종류</label>
+  <select id="prov">
+    <option value="gemini">Google Gemini (무료 사용량 있음)</option>
+    <option value="groq">Groq (무료, 가장 빠름)</option>
+    <option value="openai">OpenAI (ChatGPT)</option>
+    <option value="claude">Anthropic Claude</option>
+  </select>
+  <label>API 키 (이 폰에만 저장됨)</label>
+  <input id="key" type="password" autocomplete="off">
+  <label>예비 Groq 키 (선택 · 위 AI가 실패하면 자동 전환)</label>
+  <input id="fbkey" type="password" placeholder="gsk_..." autocomplete="off">
+  <label>모델</label>
+  <input id="model">
+
+  <h4>호출 방식</h4>
+  <label>대기 방식</label>
+  <select id="mode">
+    <option value="speech">음성 호출어 ("자비스" / "헤이 자비스")</option>
+    <option value="clap">박수 두 번 (평소엔 잠자기, 배터리 절약)</option>
+  </select>
+  <label>호출어</label>
+  <input id="wake">
+
+  <h4>내 정보</h4>
+  <label>기본 위치 (날씨용)</label>
+  <input id="city">
+  <label>호칭 (자비스가 부르는 이름)</label>
+  <input id="owner" placeholder="예: 사장님">
+
+  <h4>유튜브 (선택)</h4>
+  <label>YouTube Data API 키 — 있으면 검색이 가장 정확하고 안정적</label>
+  <input id="ytkey" type="password" autocomplete="off">
+
+  <h4>컴퓨터 ↔ 폰 파일 전송 / 원격 대화 (텔레그램)</h4>
+  <label>텔레그램 봇 토큰 (BotFather에서 발급)</label>
+  <input id="tgtoken" type="password" autocomplete="off">
+  <label>내 텔레그램 ID (봇에게 /id 라고 보내면 알려줌)</label>
+  <input id="tgowner" inputmode="numeric">
+
+  <div style="display:flex;gap:8px"><button id="save">저장</button><button class="ghost" id="close" type="button">닫기</button></div>
+</dialog>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const DEF={gemini:'gemini-2.5-flash',openai:'gpt-4o-mini',groq:'llama-3.3-70b-versatile',claude:'claude-haiku-5-5'};
+let S={};try{S=JSON.parse(localStorage.getItem('jarvis')||'{}')}catch(_){}
+const cfg=Object.assign({prov:'gemini',key:'',fbKey:'',model:'',wake:'자비스',owner:'',city:'부산 해운대구',ytKey:'',tgToken:'',tgOwner:'',mode:'speech'},S);
+if(!cfg.model)cfg.model=DEF[cfg.prov];
+const persist=()=>{try{localStorage.setItem('jarvis',JSON.stringify(cfg))}catch(_){}};
+
+let active=false,busy=false,awaiting=false,sleeping=false,ignoreUntil=0,followUntil=0,history=[],wakeLock=null;
+let mem=[];try{mem=JSON.parse(localStorage.getItem('jarvis_mem')||'[]')}catch(_){}
+const saveMem=()=>{try{localStorage.setItem('jarvis_mem',JSON.stringify(mem))}catch(_){}};
+
+/* ---------- UI ---------- */
+function tick(){const d=new Date();$('clock').textContent=d.toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',hour12:false});
+ $('date').textContent=d.toLocaleDateString('ko-KR',{year:'numeric',month:'long',day:'numeric',weekday:'long'});}
+tick();setInterval(tick,1000);
+const orb=c=>$('orb').className=c||'';
+const status=t=>$('status').textContent=t;
+function add(cls,t){const e=document.createElement('div');e.className='m '+cls;e.textContent=t;$('log').append(e);$('log').scrollTop=1e9;return e}
+function note(t){const e=document.createElement('div');e.className='t';e.textContent=t;$('log').append(e);$('log').scrollTop=1e9}
+function linkCard(url,label,icon='🔗'){
+ const a=document.createElement('a');a.className='card';a.href=url;a.target='_blank';a.rel='noopener';
+ a.innerHTML='<span>'+icon+'</span><b></b><span>열기 ›</span>';a.querySelector('b').textContent=label||url;
+ $('log').append(a);$('log').scrollTop=1e9;
+ try{if(navigator.userActivation&&navigator.userActivation.isActive)window.open(url,'_blank')}catch(_){}
+}
+function idle(){
+ if(!active){orb('');status('대기 중');return}
+ orb('on');
+ status(sleeping?'박수를 두 번 쳐 주세요 👏👏':`"${cfg.wake}"라고 불러 주세요`);
+}
+
+/* ---------- 설정창 ---------- */
+$('prov').onchange=()=>{$('model').value=DEF[$('prov').value]};
+$('cfg').onclick=()=>{
+ const m={prov:'prov',key:'key',fbKey:'fbkey',model:'model',mode:'mode',wake:'wake',city:'city',owner:'owner',ytKey:'ytkey',tgToken:'tgtoken',tgOwner:'tgowner'};
+ for(const k in m)$(m[k]).value=cfg[k]||'';
+ $('dlg').showModal();
+};
+$('close').onclick=()=>$('dlg').close();
+$('save').onclick=()=>{
+ const m={prov:'prov',key:'key',fbKey:'fbkey',model:'model',mode:'mode',wake:'wake',city:'city',owner:'owner',ytKey:'ytkey',tgToken:'tgtoken',tgOwner:'tgowner'};
+ for(const k in m)cfg[k]=$(m[k]).value.trim();
+ cfg.wake=cfg.wake||'자비스';cfg.model=cfg.model||DEF[cfg.prov];cfg.city=cfg.city||'부산 해운대구';cfg.mode=cfg.mode||'speech';
+ persist();$('dlg').close();tgRestart();
+ if(active){stopRec();stopClap();sleeping=false;idle()}
+};
+
+/* ---------- 음성 출력 (문장 단위 큐) ---------- */
+let voice=null,pend=0,speaking=false,waiters=[];
+function pickVoice(){try{voice=speechSynthesis.getVoices().find(v=>v.lang&&v.lang.replace('_','-').startsWith('ko'))||null}catch(_){}}
+try{pickVoice();speechSynthesis.onvoiceschanged=pickVoice}catch(_){}
+const clean=t=>String(t).replace(/https?:\/\/\S+/g,' 링크 ').replace(/[*_#`>~|]/g,' ').replace(/\p{Extended_Pictographic}/gu,'').replace(/\s+/g,' ').trim();
+function say(t){
+ t=clean(t);if(!t||!('speechSynthesis' in window))return;
+ const u=new SpeechSynthesisUtterance(t);u.lang='ko-KR';if(voice)u.voice=voice;u.rate=1.1;
+ pend++;speaking=true;orb('talk');status('말하는 중…');
+ let fin=false;
+ const done=()=>{if(fin)return;fin=true;pend=Math.max(0,pend-1);if(!pend){speaking=false;ignoreUntil=Date.now()+700;const w=waiters;waiters=[];w.forEach(r=>r())}};
+ u.onend=u.onerror=done;
+ setTimeout(done,Math.max(8000,t.length*400)); // 안전장치: 일부 기기에서 onend가 안 오는 경우
+ try{speechSynthesis.speak(u)}catch(_){done()}
+}
+function drain(){return pend?new Promise(r=>{waiters.push(r)}):Promise.resolve()}
+function stopSpeech(){try{speechSynthesis.cancel()}catch(_){}pend=0;speaking=false;const w=waiters;waiters=[];w.forEach(r=>r())}
+$('orb').onclick=()=>{stopSpeech();media('pause');idle()};
+
+/* ---------- 유튜브 플레이어 ---------- */
+let ytFrame=null;
+function playVideo(id){
+ const box=$('player').querySelector('.frame');box.innerHTML='';
+ ytFrame=document.createElement('iframe');
+ ytFrame.allow='autoplay; encrypted-media; picture-in-picture';ytFrame.allowFullscreen=true;
+ ytFrame.src=`https://www.youtube.com/embed/${encodeURIComponent(id)}?autoplay=1&playsinline=1&enablejsapi=1&rel=0`;
+ box.append(ytFrame);$('player').classList.add('show');
+}
+function ytCmd(fn){try{ytFrame&&ytFrame.contentWindow.postMessage(JSON.stringify({event:'command',func:fn,args:[]}),'*')}catch(_){}}
+function media(action){
+ if(!ytFrame)return false;
+ if(action==='pause')ytCmd('pauseVideo');
+ else if(action==='resume')ytCmd('playVideo');
+ else if(action==='stop'){$('player').classList.remove('show');$('player').querySelector('.frame').innerHTML='';ytFrame=null}
+ return true;
+}
+$('pp').onclick=()=>{ytCmd('playVideo')};
+$('pc').onclick=()=>media('stop');
+async function ytSearch(q){
+ const to=ms=>{try{return AbortSignal.timeout(ms)}catch(_){return undefined}};
+ if(cfg.ytKey){
+  try{
+   const r=await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoEmbeddable=true&maxResults=1&q=${encodeURIComponent(q)}&key=${encodeURIComponent(cfg.ytKey)}`,{signal:to(8000)});
+   const j=await r.json();const it=j.items&&j.items[0];
+   if(it)return {id:it.id.videoId,title:it.snippet.title};
+  }catch(_){}
+ }
+ for(const h of ['https://api.piped.private.coffee','https://pipedapi.adminforge.de','https://pipedapi.kavin.rocks']){
+  try{
+   const r=await fetch(`${h}/search?q=${encodeURIComponent(q)}&filter=videos`,{signal:to(5000)});
+   const j=await r.json();const it=(j.items||[]).find(x=>x.url&&x.url.includes('v='));
+   if(it)return {id:it.url.split('v=')[1].split('&')[0],title:it.title};
+  }catch(_){}
+ }
+ return null;
+}
+
+/* ---------- 웹 읽기/검색 (Jina Reader) ---------- */
+async function jina(url,max=3500){
+ let signal;try{signal=AbortSignal.timeout(15000)}catch(_){}
+ const r=await fetch('https://r.jina.ai/'+url,{headers:{Accept:'text/plain'},signal});
+ if(!r.ok)throw new Error('페이지 읽기 실패('+r.status+')');
+ return (await r.text()).slice(0,max);
+}
+function parseDDG(md){
+ const out=[];
+ for(const b of md.split(/^## /m).slice(1)){
+  const lines=b.split('\n').map(l=>l.trim()).filter(Boolean);
+  const m=lines[0].match(/^\[(.+?)\]\((https?:[^)]+)\)/);if(!m)continue;
+  let url=m[2];try{const u=new URL(url);if(u.searchParams.get('uddg'))url=decodeURIComponent(u.searchParams.get('uddg'))}catch(_){}
+  const sn=lines.slice(1).find(l=>l.startsWith('[')&&!l.startsWith('[!['))||'';
+  out.push({title:m[1].replace(/\*\*/g,''),url,snippet:sn.replace(/^\[/,'').replace(/\]\(.*$/,'').replace(/\*\*/g,'').slice(0,220)});
+ }
+ return out;
+}
+async function webSearch(q,n=4){
+ let rs=[];
+ for(let k=0;k<3&&!rs.length;k++){                 // 일시적으로 비어 오는 경우가 있어 최대 3번 시도
+  if(k)await sleep(1200*k);
+  try{rs=parseDDG(await jina('https://html.duckduckgo.com/html/?kl=kr-kr&q='+encodeURIComponent(q),12000)).slice(0,n)}catch(e){if(k===2)throw e}
+ }
+ if(!rs.length)return '검색 결과가 없어요';
+ return rs.map((r,i)=>`${i+1}. ${r.title} (${new URL(r.url).hostname}) — ${r.snippet}`).join('\n');
+}
+
+/* ---------- 도구 ---------- */
+const WX={0:'맑음',1:'대체로 맑음',2:'구름 조금',3:'흐림',45:'안개',48:'안개',51:'이슬비',53:'이슬비',55:'이슬비',61:'비',63:'비',65:'강한 비',71:'눈',73:'눈',75:'강한 눈',80:'소나기',81:'소나기',82:'강한 소나기',95:'뇌우',96:'뇌우',99:'뇌우'};
+const GEO={'해운대':[35.1631,129.1639,'부산 해운대구'],'부산':[35.1796,129.0756,'부산'],'서울':[37.5665,126.978,'서울'],'인천':[37.4563,126.7052,'인천'],'대구':[35.8714,128.6014,'대구'],'대전':[36.3504,127.3845,'대전'],'광주':[35.1595,126.8526,'광주'],'울산':[35.5384,129.3114,'울산'],'제주':[33.4996,126.5312,'제주']};
+async function geo(city){
+ for(const k in GEO)if(city.includes(k))return GEO[k];
+ for(const name of [city,...city.split(/\s+/).reverse()]){
+  const g=await (await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1&language=ko`)).json();
+  if(g.results&&g.results[0])return [g.results[0].latitude,g.results[0].longitude,g.results[0].name];
+ }
+ return null;
+}
+const APPS={'유튜브':['vnd.youtube://','유튜브 앱'],'카카오톡':['kakaotalk://launch','카카오톡'],'카톡':['kakaotalk://launch','카카오톡'],'네이버':['naversearchapp://','네이버 앱'],'네이버지도':['nmap://','네이버 지도'],'카카오맵':['kakaomap://','카카오맵'],'전화':['tel:','전화'],'문자':['sms:','문자'],'설정':['intent:#Intent;action=android.settings.SETTINGS;end','설정']};
+const TOOLS={
+ async get_weather({city,day=0}){
+  const g=await geo(city||cfg.city);if(!g)return `${city||cfg.city} 위치를 찾지 못했어요`;
+  const w=await (await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${g[0]}&longitude=${g[1]}&current=temperature_2m,apparent_temperature&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=2`)).json();
+  const d=Math.min(1,+day||0),c=w.current,dl=w.daily;
+  return `${g[2]} ${d?'내일':'오늘'}: ${WX[dl.weather_code[d]]||'정보없음'}, 최저 ${dl.temperature_2m_min[d]}도 최고 ${dl.temperature_2m_max[d]}도, 강수확률 ${dl.precipitation_probability_max[d]}%`+(d?'':`. 현재 ${c.temperature_2m}도, 체감 ${c.apparent_temperature}도`);
+ },
+ async web_search({query}){return await webSearch(query)},
+ async news({topic}){return await webSearch((topic||'오늘 주요')+' 뉴스',5)},
+ async read_url({url}){return await jina(url)},
+ async wiki({query,source}){
+  if(source==='namu'){
+   // 나무위키는 봇 차단이 있어 직접 못 읽음 → 검색 결과 요약으로 대체
+   return '(나무위키 검색 결과)\n'+await webSearch('site:namu.wiki '+query,4);
+  }
+  const q=await (await fetch(`https://ko.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*&srlimit=1`)).json();
+  const t=q.query&&q.query.search&&q.query.search[0]&&q.query.search[0].title;if(!t)return '위키백과에서 찾지 못했어요';
+  const r=await (await fetch(`https://ko.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(t)}`)).json();
+  return `${t}: ${(r.extract||'').slice(0,600)}`;
+ },
+ async youtube({query}){
+  const v=await ytSearch(query);
+  if(!v){linkCard('https://www.youtube.com/results?search_query='+encodeURIComponent(query),'유튜브에서 "'+query+'" 검색','▶️');return '영상을 바로 못 찾아서 유튜브 검색 링크를 화면에 띄웠어요'}
+  playVideo(v.id);linkCard('https://www.youtube.com/watch?v='+v.id,v.title,'▶️');
+  return `재생 시작: ${v.title}`;
+ },
+ async media({action}){return media(action)?'완료':'재생 중인 영상이 없어요'},
+ async open_link({url,label}){linkCard(url,label||url);return '링크를 화면에 띄웠어요. 눌러서 열 수 있어요'},
+ async maps({query,mode}){
+  const u=mode==='route'?'https://map.naver.com/p/directions/-/-/-/transit?c=15.00,0,0,0,dh&q='+encodeURIComponent(query):'https://map.naver.com/p/search/'+encodeURIComponent(query);
+  linkCard(u,'지도: '+query,'🗺️');return '지도 링크를 화면에 띄웠어요';
+ },
+ async launch_app({app}){
+  const k=Object.keys(APPS).find(x=>(app||'').includes(x));
+  if(!k){linkCard('https://www.google.com/search?q='+encodeURIComponent(app||''),(app||'')+' 검색','🔎');return '그 앱은 몰라서 검색 링크를 띄웠어요'}
+  linkCard(APPS[k][0],APPS[k][1]+' 열기','📱');return `${APPS[k][1]} 열기 버튼을 화면에 띄웠어요`;
+ },
+ async battery(){if(!navigator.getBattery)return '이 브라우저는 배터리 정보를 못 줘요';const b=await navigator.getBattery();return `배터리 ${Math.round(b.level*100)}%${b.charging?' (충전 중)':''}`},
+ async set_timer({seconds,label=''}){
+  seconds=Math.max(1,Math.round(+seconds||0));
+  setTimeout(()=>announce(`${label?label+' ':''}타이머가 끝났어요.`),seconds*1000);
+  return `${seconds}초 타이머 설정됨`;
+ },
+ async remember({fact}){if(fact&&!mem.includes(fact)){mem.push(fact);mem=mem.slice(-40);saveMem()}return '기억했어요'},
+ async forget({keyword}){const n=mem.length;mem=mem.filter(m=>!m.includes(keyword));saveMem();return `${n-mem.length}개 삭제`}
+};
+function announce(t){
+ add('a',t);tgSend(cfg.tgOwner,t);
+ const w=setInterval(()=>{if(!speaking&&!busy){clearInterval(w);say(t)}},500);
+}
+function parseTool(t){
+ const j=t.search(/\{\s*"tool"/);if(j<0)return null;
+ const s=t.slice(j);
+ for(let e=s.lastIndexOf('}');e>0;e=s.lastIndexOf('}',e-1)){try{const o=JSON.parse(s.slice(0,e+1));if(o&&TOOLS[o.tool])return o}catch(_){}}
+ return null;
+}
+
+/* ---------- 시스템 프롬프트 ---------- */
+function system(){
+ const now=new Date().toLocaleString('ko-KR',{dateStyle:'full',timeStyle:'short'});
+ return `너는 "자비스"라는 이름의 개인 음성 비서다. 사용자${cfg.owner?`(${cfg.owner})`:''}와 한국어로 대화한다.
+답변은 소리 내어 읽히므로 1~3문장으로 짧고 자연스럽게 말하고, 마크다운·이모지·목록 기호·URL은 말하지 않는다. 약간 위트 있고 믿음직한 집사 같은 말투를 쓴다.
+모르는 것은 아는 척하지 말고 도구로 확인하거나 모른다고 말한다. 최신 정보나 사실 확인이 필요하면 추측하지 말고 도구를 써라.
+현재 시각: ${now}
+사용자 기본 위치: ${cfg.city}
+${mem.length?'네가 기억하고 있는 사용자 정보: '+mem.join(' / '):'아직 기억하는 사용자 정보가 없다.'}
+
+[도구]
+도구가 필요하면 다른 말 없이 JSON 한 줄만 출력해라. 예: {"tool":"get_weather","args":{"city":"부산","day":0}}
+- get_weather: 날씨. args: city(생략하면 기본 위치), day(0=오늘,1=내일)
+- web_search: 인터넷 검색. args: query
+- news: 뉴스. args: topic
+- read_url: 웹페이지 본문 읽기. args: url
+- wiki: 백과 조회. args: query, source("wikipedia" 또는 "namu"(나무위키))
+- youtube: 유튜브에서 영상/노래 찾아 바로 재생. args: query
+- media: 재생 중인 영상 제어. args: action("pause"|"resume"|"stop")
+- open_link: 화면에 링크 버튼 표시. args: url, label
+- maps: 지도 검색 링크. args: query, mode("search"|"route")
+- launch_app: 폰 앱 열기 버튼 표시. args: app(유튜브,카카오톡,네이버,네이버지도,카카오맵,전화,문자,설정)
+- battery: 폰 배터리 상태
+- set_timer: 타이머/알람. args: seconds(숫자), label
+- remember: 사용자가 기억해 달라고 하거나 이름·취향·일정처럼 오래 쓸 정보를 말할 때 저장. args: fact(한 문장)
+- forget: 기억 삭제. args: keyword
+도구 결과가 "[도구결과]"로 돌아오면 그 내용으로 자연스럽게 말로 답해라. 검색 결과는 핵심만 요약하고 출처 사이트 이름 정도만 언급해라. 도구가 필요 없으면 그냥 대답해라.`;
+}
+
+/* ---------- AI 호출 (스트리밍) ---------- */
+async function sse(r,cb){
+ const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+ for(;;){
+  const {done,value}=await rd.read();if(done)break;
+  buf+=dec.decode(value,{stream:true});
+  let i;while((i=buf.indexOf('\n'))>=0){
+   const line=buf.slice(0,i).trim();buf=buf.slice(i+1);
+   if(line.startsWith('data:')){const d=line.slice(5).trim();if(d&&d!=='[DONE]'){try{cb(JSON.parse(d))}catch(_){}}}
+  }
+ }
+}
+async function errText(r){try{const j=await r.json();return (j.error&&j.error.message)||JSON.stringify(j).slice(0,200)}catch(_){return String(r.status)}}
+async function callProv(prov,key,model,onDelta){
+ const sys=system(),ac=new AbortController();
+ let first=setTimeout(()=>ac.abort(),15000);          // 첫 응답 15초 제한
+ const total=setTimeout(()=>ac.abort(),45000);         // 전체 45초 제한
+ const got=t=>{if(first){clearTimeout(first);first=null}onDelta(t)};
+ try{
+  let r;
+  if(prov==='gemini'){
+   const gc={maxOutputTokens:400};if(/2\.5-flash/.test(model))gc.thinkingConfig={thinkingBudget:0};
+   r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,{method:'POST',signal:ac.signal,
+    headers:{'content-type':'application/json','x-goog-api-key':key},
+    body:JSON.stringify({systemInstruction:{parts:[{text:sys}]},
+     contents:history.map(m=>({role:m.role==='assistant'?'model':'user',parts:[{text:m.content}]})),generationConfig:gc})});
+   if(!r.ok)throw new Error(await errText(r));
+   await sse(r,j=>{const p=j.candidates&&j.candidates[0]&&j.candidates[0].content&&j.candidates[0].content.parts;if(p)p.forEach(x=>x.text&&got(x.text))});
+  }else if(prov==='openai'||prov==='groq'){
+   const url=prov==='groq'?'https://api.groq.com/openai/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
+   r=await fetch(url,{method:'POST',signal:ac.signal,headers:{'content-type':'application/json',authorization:'Bearer '+key},
+    body:JSON.stringify({model,stream:true,max_completion_tokens:400,messages:[{role:'system',content:sys},...history]})});
+   if(!r.ok)throw new Error(await errText(r));
+   await sse(r,j=>{const d=j.choices&&j.choices[0]&&j.choices[0].delta;if(d&&d.content)got(d.content)});
+  }else{
+   r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',signal:ac.signal,headers:{
+    'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model,max_tokens:400,stream:true,system:sys,messages:history})});
+   if(!r.ok)throw new Error(await errText(r));
+   await sse(r,j=>{if(j.type==='content_block_delta'&&j.delta&&j.delta.text)got(j.delta.text)});
+  }
+ }finally{clearTimeout(first);clearTimeout(total)}
+}
+
+/* 스트리밍된 글을 문장 단위로 바로 말하고, 도구 호출 JSON은 말하지 않음 */
+function makeStreamer(live){
+ let all='',buf='',mode=null,bubble=null,spoke=false,any=false;
+ const sayPart=s=>{s=s.trim();if(s&&live){spoke=true;say(s)}};
+ const flush=fin=>{
+  let i;while((i=buf.search(/[.!?。…\n]\s/))>=0){sayPart(buf.slice(0,i+1));buf=buf.slice(i+2)}
+  if(fin&&buf.trim()){sayPart(buf);buf=''}
+ };
+ return {
+  push(d){
+   any=true;all+=d;
+   if(mode===null){const t=all.trimStart();if(!t)return;mode=(t[0]==='{'||t.startsWith('```'))?'tool':'text';buf=t;}
+   else if(mode==='text')buf+=d;
+   if(mode==='text'){
+    const k=all.search(/\{\s*"tool"/);
+    if(k>=0){mode='tool';const pre=all.slice(0,k);buf=pre;flush(true);buf='';return}
+    if(!bubble)bubble=add('a','');
+    bubble.textContent=all.trim();$('log').scrollTop=1e9;
+    if(live)flush(false);
+   }
+  },
+  end(){if(mode==='text')flush(true)},
+  get text(){return all.trim()},
+  get any(){return any},
+  get spoke(){return spoke},
+  get bubble(){return bubble}
+ };
+}
+async function generate(live){
+ const st=makeStreamer(live);
+ try{
+  try{await callProv(cfg.prov,cfg.key,cfg.model,d=>st.push(d))}
+  catch(e){
+   if(!st.any&&cfg.fbKey&&cfg.prov!=='groq'){status('예비 AI로 전환…');await callProv('groq',cfg.fbKey,DEF.groq,d=>st.push(d))}
+   else if(!st.any)throw e;
+  }
+ }finally{st.end()}
+ if(!st.text)throw new Error('빈 응답');
+ return st;
+}
+
+/* ---------- 빠른 처리 (AI 없이 즉시) ---------- */
+async function quick(t){
+ const s=t.replace(/\s+/g,' ');
+ if(/(지금|현재)?\s*(몇\s*시|시간\s*(알려|이야|뭐|얼마))/.test(s)&&!/날씨/.test(s)){
+  const d=new Date();return `지금은 ${d.getHours()<12?'오전':'오후'} ${d.getHours()%12||12}시 ${d.getMinutes()}분이에요.`;
+ }
+ const tm=s.match(/(\d+)\s*(초|분|시간)\s*(?:뒤|후)?(?:에)?\s*(?:타이머|알람|알려)/)||s.match(/(?:타이머|알람)\s*(\d+)\s*(초|분|시간)/);
+ if(tm){const n=+tm[1],sec=tm[2]==='초'?n:tm[2]==='분'?n*60:n*3600;await TOOLS.set_timer({seconds:sec});return `${n}${tm[2]} 타이머를 맞췄어요.`}
+ if(ytFrame&&/^(영상|노래|음악|유튜브)?\s*(일시\s*정지|멈춰|잠깐 멈춰|스톱|stop)/.test(s)){media('pause');return '일시정지했어요.'}
+ if(ytFrame&&/(계속|다시)\s*(재생|틀어)/.test(s)){media('resume');return '다시 재생할게요.'}
+ if(ytFrame&&/(영상|노래|음악|유튜브)?\s*(꺼|종료|닫아)/.test(s)&&/(영상|노래|음악|유튜브)/.test(s)){media('stop');return '영상을 껐어요.'}
+ const yt=s.match(/^(?:유튜브(?:에서)?\s*)?(.+?)\s*(?:틀어|재생해|들려)/);
+ if(yt&&/(유튜브|노래|음악|영상|뮤비)/.test(s)){
+  const q=yt[1].replace(/유튜브(에서)?|좀|한번|그냥/g,'').trim();
+  if(q){return await TOOLS.youtube({query:q}).then(r=>r.startsWith('재생')?'영상을 틀게요.':r)}
+ }
+ if(/날씨/.test(s)&&!/(우산|옷|입을|비올|비 와)/.test(s)){
+  const m=s.match(/([가-힣]{2,}?)\s*(?:의\s*)?(?:오늘|내일)?\s*날씨/);
+  const bad=['오늘','내일','현재','지금','요즘','이번','주간','날씨'];
+  const city=m&&!bad.includes(m[1])&&!bad.some(b=>m[1].endsWith(b))?m[1]:'';
+  return await TOOLS.get_weather({city,day:/내일/.test(s)?1:0});
+ }
+ return null;
+}
+
+/* ---------- 메인 대화 ---------- */
+async function ask(text,opt={}){
+ const live=opt.speak!==false;
+ if(!cfg.key){const m='설정에서 API 키를 먼저 입력해 주세요.';add('a',m);if(live)say(m);await drain();return m}
+ busy=true;orb('think');status('생각 중…');
+ add('u',(opt.tg?'📨 ':'')+text);
+ const base=history.length;history.push({role:'user',content:text});
+ let final='';
+ try{
+  const q=await quick(text).catch(()=>null);
+  if(q){final=q;history.push({role:'assistant',content:q});add('a',q);if(live)say(q)}
+  else{
+   for(let i=0;i<4;i++){
+    const st=await generate(live);
+    const tc=parseTool(st.text);
+    if(!tc){final=st.text;history.push({role:'assistant',content:final});if(!st.bubble)add('a',final);if(live&&!st.spoke)say(final);break}
+    status('도구 사용: '+tc.tool+'…');note('🔧 '+tc.tool+' '+JSON.stringify(tc.args||{}).slice(0,80));
+    let res;try{res=await TOOLS[tc.tool](tc.args||{})}catch(e){res='도구 오류: '+e.message}
+    history.push({role:'assistant',content:JSON.stringify(tc)});
+    history.push({role:'user',content:'[도구결과] '+String(res).slice(0,3500)});
+    if(i===3){final=String(res).slice(0,300);add('a',final);if(live)say(final)}
+   }
+  }
+  history=history.slice(-24);while(history.length&&history[0].role!=='user')history.shift();
+ }catch(e){
+  history.length=base;final='오류가 발생했어요: '+e.message;add('a',final);if(live)say('오류가 발생했어요. 잠시 후 다시 말씀해 주세요.');
+ }
+ if(live)await drain();
+ busy=false;idle();
+ return final;
+}
+
+/* ---------- 음성 인식 ---------- */
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let rec=null,recRunning=false;
+const WAKES=['헤이 자비스','헤이자비스','hey jarvis','자비스','자비서','쟈비스','자비즈','재비스','jarvis'];
+function parseWake(t){
+ const low=t.toLowerCase();let best=-1,len=0;
+ for(const w of [cfg.wake.toLowerCase(),...WAKES]){const i=low.indexOf(w);if(i>=0&&(best<0||i<best||(i===best&&w.length>len))){best=i;len=w.length}}
+ return best<0?null:{cmd:t.slice(best+len).replace(/^[\s,.!?~야아요]+/,'').trim()};
+}
+async function heard(t){
+ if(!t||speaking||busy||Date.now()<ignoreUntil)return;
+ const w=parseWake(t),convo=Date.now()<followUntil;
+ if(w){
+  media('pause');
+  if(w.cmd){await run(w.cmd);return}
+  awaiting=true;followUntil=Date.now()+10000;orb('listen');status('듣고 있어요…');say('네?');await drain();return;
+ }
+ if(awaiting||convo){awaiting=false;await run(t)}
+}
+async function run(cmd){
+ awaiting=false;
+ await ask(cmd);
+ followUntil=Date.now()+(cfg.mode==='clap'?20000:8000);   // 이어 말하기 창
+}
+function startRec(){
+ if(!SR){status('이 브라우저는 음성 인식을 지원하지 않아요 (Chrome 사용)');return}
+ if(recRunning)return;
+ try{
+  rec=new SR();rec.lang='ko-KR';rec.continuous=true;rec.interimResults=false;
+  rec.onstart=()=>{recRunning=true};
+  rec.onend=()=>{recRunning=false};
+  rec.onerror=e=>{recRunning=false;if(e.error==='not-allowed'||e.error==='service-not-allowed'){active=false;$('go').textContent='▶ 시작';status('마이크 권한을 허용해 주세요')}};
+  rec.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];if(r.isFinal)heard(r[0].transcript.trim())}};
+  rec.start();
+ }catch(_){recRunning=false}
+}
+function stopRec(){try{rec&&rec.abort()}catch(_){}recRunning=false}
+
+/* ---------- 박수 두 번 감지 ---------- */
+let clapStream=null,clapCtx=null,clapTimer=null,clapN=0,lastPeak=0;
+async function startClap(){
+ if(clapStream||sleeping)return;
+ try{clapStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})}
+ catch(_){status('마이크 권한을 허용해 주세요');return}
+ clapCtx=new (window.AudioContext||window.webkitAudioContext)();
+ const an=clapCtx.createAnalyser();an.fftSize=1024;clapCtx.createMediaStreamSource(clapStream).connect(an);
+ const buf=new Float32Array(an.fftSize);let floor=0.01;
+ clapTimer=setInterval(()=>{
+  an.getFloatTimeDomainData(buf);let pk=0,sum=0;
+  for(let i=0;i<buf.length;i++){const a=Math.abs(buf[i]);if(a>pk)pk=a;sum+=buf[i]*buf[i]}
+  const rms=Math.sqrt(sum/buf.length);floor=floor*0.97+rms*0.03;
+  const now=performance.now();
+  if(pk>0.3&&pk>floor*8&&now-lastPeak>180){
+   if(clapN===1&&now-lastPeak<900){clapN=0;lastPeak=now;onDoubleClap();return}
+   clapN=1;lastPeak=now;
+  }
+  if(clapN&&now-lastPeak>900)clapN=0;
+ },25);
+ sleeping=true;idle();
+}
+function stopClap(){
+ clearInterval(clapTimer);clapTimer=null;
+ try{clapStream&&clapStream.getTracks().forEach(t=>t.stop())}catch(_){}
+ try{clapCtx&&clapCtx.close()}catch(_){}
+ clapStream=null;clapCtx=null;clapN=0;sleeping=false;
+}
+async function onDoubleClap(){
+ stopClap();media('pause');
+ followUntil=Date.now()+20000;awaiting=true;orb('listen');status('듣고 있어요…');
+ say('네?');await drain();
+}
+
+/* ---------- 감시 루프: 인식 재시작, 잠들기/깨우기 ---------- */
+setInterval(()=>{
+ if(!active||busy)return;
+ if(cfg.mode==='clap'){
+  if(sleeping)return;
+  if(!speaking&&Date.now()>followUntil&&!awaiting){stopRec();startClap();return}
+ }
+ if(!speaking&&!recRunning&&!sleeping)startRec();
+},1200);
+
+/* ---------- 텔레그램 (원격 대화 + 파일 받기) ---------- */
+let tgRun=false,tgAbort=null,tgOffset=+(localStorage.getItem('jarvis_tgoff')||0);
+const tgApi=m=>`https://api.telegram.org/bot${cfg.tgToken}/${m}`;
+async function tgSend(chat,text){
+ if(!cfg.tgToken||!chat)return;
+ try{await fetch(tgApi('sendMessage'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:chat,text:String(text).slice(0,4000)})})}catch(_){}
+}
+function tgRestart(){tgRun=false;try{tgAbort&&tgAbort.abort()}catch(_){}setTimeout(tgLoop,300)}
+async function tgLoop(){
+ if(tgRun||!cfg.tgToken)return;tgRun=true;
+ while(tgRun&&cfg.tgToken){
+  try{
+   tgAbort=new AbortController();
+   const r=await fetch(tgApi('getUpdates')+`?timeout=25&offset=${tgOffset}`,{signal:tgAbort.signal});
+   const j=await r.json();
+   if(!j.ok){await sleep(j.error_code===409?6000:15000);continue}
+   for(const u of j.result||[]){
+    tgOffset=u.update_id+1;try{localStorage.setItem('jarvis_tgoff',tgOffset)}catch(_){}
+    try{await tgHandle(u.message||u.edited_message)}catch(e){note('텔레그램 처리 오류: '+e.message)}
+   }
+  }catch(e){if(!tgRun)break;await sleep(4000)}
+ }
+}
+async function tgHandle(m){
+ if(!m)return;
+ const from=String(m.from&&m.from.id),chat=m.chat.id,text=(m.text||m.caption||'').trim();
+ if(/^\/id\b/.test(text)||/^\/start\b/.test(text)){await tgSend(chat,`당신의 텔레그램 ID: ${from}\n자비스 설정의 "내 텔레그램 ID"에 이 숫자를 넣어 주세요.`);return}
+ if(!cfg.tgOwner||from!==String(cfg.tgOwner)){await tgSend(chat,'허용되지 않은 사용자예요.');return}
+ const f=m.document||m.audio||m.video||m.voice||m.video_note||(m.photo&&m.photo[m.photo.length-1]);
+ if(f){
+  const name=f.file_name||(m.photo?`photo_${f.file_unique_id}.jpg`:`file_${f.file_unique_id}`);
+  const g=await (await fetch(tgApi('getFile')+'?file_id='+encodeURIComponent(f.file_id))).json();
+  if(!g.ok){await tgSend(chat,'파일을 받지 못했어요: '+(g.description||'')+'\n(20MB를 넘는 파일은 텔레그램 봇이 못 줘요. 압축하거나 나눠 보내 주세요.)');return}
+  const fr=await fetch(`https://api.telegram.org/file/bot${cfg.tgToken}/${g.result.file_path}`);
+  if(!fr.ok)throw new Error('다운로드 실패 '+fr.status);
+  receiveFile(await fr.blob(),name);
+  await tgSend(chat,`✅ 받았어요: ${name}`);
+  if(!text)return;
+ }
+ if(text){
+  while(busy)await sleep(500);
+  const ans=await ask(text,{speak:false,tg:true});
+  await tgSend(chat,ans);
+ }
+}
+function receiveFile(blob,name){
+ const url=URL.createObjectURL(blob);
+ const a=document.createElement('a');a.className='card';a.href=url;a.download=name;
+ const kb=blob.size>1048576?(blob.size/1048576).toFixed(1)+'MB':Math.ceil(blob.size/1024)+'KB';
+ a.innerHTML='<span>📥</span><b></b><span>저장 ›</span>';a.querySelector('b').textContent=`${name} (${kb})`;
+ $('log').append(a);$('log').scrollTop=1e9;
+ try{a.click()}catch(_){}                         // 자동 저장 시도 (막히면 버튼을 눌러 저장)
+ note('📥 파일 받음: '+name);
+}
+
+/* ---------- 시작/정지 ---------- */
+$('go').onclick=async()=>{
+ if(!active){
+  if(!cfg.key){$('cfg').click();return}
+  active=true;$('go').textContent='■ 정지';sleeping=false;followUntil=0;idle();
+  try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}
+  pickVoice();
+  say(`자비스 준비됐습니다${cfg.owner?', '+cfg.owner:''}.`);
+  if(cfg.mode==='clap'){await drain();followUntil=0;await startClap()}else startRec();
+ }else{
+  active=false;$('go').textContent='▶ 시작';stopRec();stopClap();
+  try{wakeLock&&wakeLock.release()}catch(_){}
+  stopSpeech();idle();
+ }
+};
+$('f').onsubmit=e=>{e.preventDefault();const v=$('t').value.trim();if(v&&!busy){$('t').value='';ask(v)}};
+document.addEventListener('visibilitychange',async()=>{if(active&&document.visibilityState==='visible'){try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}}});
+window.addEventListener('beforeunload',()=>{try{speechSynthesis.cancel()}catch(_){}});
+tgLoop();
+</script>
+</body>
+</html>
