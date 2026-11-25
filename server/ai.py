@@ -1,0 +1,153 @@
+"""AI 공급자 연결: 키 자동 배정, 스트리밍, 실패 시 다음 AI로 전환(쿨다운 포함)."""
+import json
+import os
+import time
+
+import httpx
+
+DEFAULT_MODELS = {
+    "gemini": "gemini-2.5-flash",
+    "groq": "llama-3.3-70b-versatile",
+    "openai": "gpt-4o-mini",
+    "claude": "claude-haiku-5-5",
+}
+ENV_KEYS = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+}
+NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "ChatGPT", "claude": "Claude"}
+
+_transport = None  # 테스트에서 httpx.MockTransport 를 넣는 자리
+_cooldown: dict[str, float] = {}
+
+
+class ProviderError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(f"{status}: {message}")
+        self.status = status
+        self.message = message
+
+
+# 위키백과 등은 봇 이름을 밝히지 않으면 403 으로 막는다
+BOT_UA = "JarvisServer/1.0 (personal voice assistant; https://github.com/acepade1/jarvis-phone)"
+
+
+def client(timeout: float = 60.0) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=_transport,
+        timeout=httpx.Timeout(timeout, connect=10.0),
+        headers={"User-Agent": BOT_UA},
+    )
+
+
+def available() -> dict[str, str]:
+    """환경변수에 들어 있는 키 중 쓸 수 있는 것. {공급자: 키}"""
+    out = {}
+    for prov, env in ENV_KEYS.items():
+        k = os.environ.get(env, "").strip()
+        if k:
+            out[prov] = k
+    return out
+
+
+def model_for(prov: str) -> str:
+    return os.environ.get(f"{prov.upper()}_MODEL", "").strip() or DEFAULT_MODELS[prov]
+
+
+def chain(fast: bool = False) -> list[str]:
+    keys = available()
+    order = ["groq", "gemini", "openai", "claude"] if fast else ["gemini", "groq", "openai", "claude"]
+    allp = [p for p in order if p in keys]
+    now = time.time()
+    ok = [p for p in allp if _cooldown.get(p, 0) <= now]
+    return ok or allp
+
+
+def mark_failed(prov: str, err: Exception) -> None:
+    msg = str(err).lower()
+    hard = any(w in msg for w in ("429", "quota", "rate", "limit", "exceed", "401", "403", "invalid", "api key", "permission"))
+    _cooldown[prov] = time.time() + (120 if hard else 20)
+
+
+def reset_cooldowns() -> None:
+    _cooldown.clear()
+
+
+async def _sse(resp: httpx.Response):
+    async for line in resp.aiter_lines():
+        line = line.strip()
+        if line.startswith("data:"):
+            d = line[5:].strip()
+            if d and d != "[DONE]":
+                try:
+                    yield json.loads(d)
+                except ValueError:
+                    pass
+
+
+async def _fail(resp: httpx.Response) -> ProviderError:
+    body = (await resp.aread()).decode("utf-8", "replace")
+    try:
+        j = json.loads(body)
+        msg = (j.get("error") or {}).get("message") if isinstance(j.get("error"), dict) else str(j)[:200]
+    except ValueError:
+        msg = body[:200]
+    return ProviderError(resp.status_code, msg or "오류")
+
+
+async def stream(prov: str, system: str, messages: list[dict], max_tokens: int = 400):
+    """텍스트 조각을 하나씩 내보내는 비동기 제너레이터."""
+    key = available()[prov]
+    model = model_for(prov)
+    async with client() as c:
+        if prov == "gemini":
+            gc: dict = {"maxOutputTokens": max_tokens}
+            if "2.5-flash" in model:
+                gc["thinkingConfig"] = {"thinkingBudget": 0}  # 속도 우선
+            body = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [
+                    {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+                    for m in messages
+                ],
+                "generationConfig": gc,
+            }
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
+            async with c.stream("POST", url, json=body, headers={"x-goog-api-key": key}) as r:
+                if r.status_code != 200:
+                    raise await _fail(r)
+                async for j in _sse(r):
+                    parts = (((j.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+                    for p in parts:
+                        if p.get("text"):
+                            yield p["text"]
+        elif prov in ("groq", "openai"):
+            url = (
+                "https://api.groq.com/openai/v1/chat/completions"
+                if prov == "groq"
+                else "https://api.openai.com/v1/chat/completions"
+            )
+            body = {
+                "model": model,
+                "stream": True,
+                "max_completion_tokens": max_tokens,
+                "messages": [{"role": "system", "content": system}, *messages],
+            }
+            async with c.stream("POST", url, json=body, headers={"Authorization": f"Bearer {key}"}) as r:
+                if r.status_code != 200:
+                    raise await _fail(r)
+                async for j in _sse(r):
+                    d = ((j.get("choices") or [{}])[0].get("delta")) or {}
+                    if d.get("content"):
+                        yield d["content"]
+        else:  # claude
+            body = {"model": model, "max_tokens": max_tokens, "stream": True, "system": system, "messages": messages}
+            hdr = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+            async with c.stream("POST", "https://api.anthropic.com/v1/messages", json=body, headers=hdr) as r:
+                if r.status_code != 200:
+                    raise await _fail(r)
+                async for j in _sse(r):
+                    if j.get("type") == "content_block_delta" and (j.get("delta") or {}).get("text"):
+                        yield j["delta"]["text"]

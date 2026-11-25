@@ -1,0 +1,27 @@
+# Render Blueprint - "Deploy to Render" 한 번으로 서버를 만듭니다.
+services:
+  - type: web
+    name: jarvis
+    runtime: python
+    plan: free
+    region: singapore          # 한국에서 가장 가까운 무료 지역
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: JARVIS_PASSWORD     # 앱에 로그인할 때 쓸 내 비밀번호 (직접 정하세요)
+        sync: false
+      - key: GEMINI_API_KEY      # aistudio.google.com 무료 발급 (하나 이상 권장)
+        sync: false
+      - key: GROQ_API_KEY        # console.groq.com 무료 (선택)
+        sync: false
+      - key: OPENAI_API_KEY      # 선택
+        sync: false
+      - key: ANTHROPIC_API_KEY   # 선택
+        sync: false
+      - key: JARVIS_SECRET       # 로그인 토큰 서명용 - 자동 생성
+        generateValue: true
+      - key: CORS_ORIGINS        # 앱을 올려 둔 주소 (GitHub Pages / APK)
+        value: https://acepade1.github.io
