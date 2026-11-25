@@ -15,7 +15,7 @@ for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
 
 from server import ai, main, tools  # noqa: E402
 
-CALLS = {"gemini": 0, "groq": 0, "forecast": 0}
+CALLS = {"gemini": 0, "groq": 0, "claude": 0, "forecast": 0}
 SCRIPT = {"gemini": [], "groq": []}  # 호출 순서대로 돌려줄 응답 (문자열 or ("err", status, msg))
 
 
@@ -37,8 +37,17 @@ DDG_HTML = (
 )
 
 
+def sse_claude(text):
+    nl = chr(10)
+    return "".join("data: " + json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": c}}) + nl + nl
+                   for c in _chunks(text))
+
+
 def handler(request: httpx.Request):
     url = str(request.url)
+    if "api.anthropic.com" in url:
+        CALLS["claude"] += 1
+        return httpx.Response(200, content=sse_claude("클로드가 답했어요.").encode(), headers={"content-type": "text/event-stream"})
     if "generativelanguage" in url or "api.groq.com" in url:
         prov = "gemini" if "generativelanguage" in url else "groq"
         CALLS[prov] += 1
@@ -69,6 +78,7 @@ def setup():
         CALLS[k] = 0
     SCRIPT["gemini"].clear()
     SCRIPT["groq"].clear()
+    ai._paid_count.update(day="", n=0)
     yield
     ai._transport = None
 
@@ -309,3 +319,64 @@ def test_no_view_for_client_actions(client):
     SCRIPT["groq"].append("맞췄어요.")
     ev = events(client, login(client), chat_body("5초 타이머"))
     assert not any(e["t"] == "view" for e in ev) and any(e["t"] == "action" for e in ev)
+
+
+# ---------------- 유료 AI(Claude)는 허락 후에만 ----------------
+@pytest.fixture
+def with_claude(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST")
+
+
+def test_paid_not_used_by_default(client, with_claude):
+    SCRIPT["gemini"].append("무료 제미나이 답이에요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "무료 제미나이 답이에요." and CALLS["claude"] == 0
+
+
+def test_free_fail_asks_approval_and_does_not_call_paid(client, with_claude):
+    SCRIPT["gemini"].append(("err", 500, "boom"))
+    SCRIPT["groq"].append(("err", 500, "boom"))
+    h = login(client)
+    ev = events(client, h, chat_body("안녕", rid="ap-1"))
+    assert ev[-1]["t"] == "approval" and "Claude" in ev[-1]["x"] and ev[-1]["providers"] == ["claude"]
+    assert CALLS["claude"] == 0, "허락 전에는 유료 AI 를 호출하면 안 됨"
+    assert client.get("/api/tasks/ap-1", headers=h).json()["state"] == "WAITING_APPROVAL"
+
+
+def test_approved_request_uses_claude(client, with_claude):
+    h = login(client)
+    SCRIPT["gemini"].append(("err", 500, "boom"))
+    SCRIPT["groq"].append(("err", 500, "boom"))
+    ask = events(client, h, chat_body("안녕", rid="ap-2"))           # 무료 AI 실패 → 허락 요청
+    assert ask[-1]["t"] == "approval" and CALLS["claude"] == 0
+    ev = events(client, h, chat_body("안녕", rid="ap-2b", allow_paid=True))   # 사용자가 허락 → 같은 질문을 다시
+    assert ev[-1]["x"] == "클로드가 답했어요." and CALLS["claude"] == 1
+
+
+def test_approval_does_not_force_paid_when_free_works(client, with_claude):
+    SCRIPT["gemini"].append("무료가 답해요.")
+    ev = events(client, login(client), chat_body("안녕", allow_paid=True))
+    assert ev[-1]["x"] == "무료가 답해요." and CALLS["claude"] == 0
+
+
+def test_explicit_mention_counts_as_permission(client, with_claude):
+    ev = events(client, login(client), chat_body("클로드로 설명해줘"))
+    assert ev[-1]["x"] == "클로드가 답했어요." and CALLS["claude"] == 1 and CALLS["gemini"] == 0
+
+
+def test_paid_daily_limit(client, with_claude, monkeypatch):
+    monkeypatch.setenv("PAID_DAILY_LIMIT", "1")
+    h = login(client)
+    first = events(client, h, chat_body("클로드로 첫 번째", rid="lim-1"))
+    assert first[-1]["x"] == "클로드가 답했어요."
+    SCRIPT["gemini"].append("한도가 지나 무료가 답해요.")
+    second = events(client, h, chat_body("클로드로 두 번째", rid="lim-2"))
+    assert CALLS["claude"] == 1, "한도를 넘으면 유료 AI 를 더 호출하면 안 됨"
+    assert second[-1]["x"] == "한도가 지나 무료가 답해요."
+
+
+def test_without_paid_key_behaviour_unchanged(client):
+    SCRIPT["gemini"].append(("err", 500, "boom"))
+    SCRIPT["groq"].append(("err", 500, "boom"))
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["t"] == "error"

@@ -184,6 +184,7 @@ h4{margin:14px 0 6px;color:var(--accent)}
   <small id="sinfo" style="margin:0 0 12px"></small>
 
   <h4>폰에 직접 넣는 AI 키 (서버를 쓰면 필요 없어요)</h4>
+  <p style="margin:0 0 8px;font-size:13px;color:var(--dim);line-height:1.5">💳 돈이 드는 AI(Claude·ChatGPT)는 <b style="color:var(--fg)">허락을 받은 뒤에만</b> 써요. 무료 AI가 막히면 물어보고, "클로드로 해줘"라고 직접 말하면 그때 써요. 하루 30회까지만 써요.</p>
   <p style="margin:0 0 8px;font-size:13px;color:var(--dim);line-height:1.6"><b style="color:var(--fg)">1분이면 끝나요</b> (카드·결제 필요 없음)<br>① 아래 <b>🔑 무료 키 받기</b> → 구글 로그인 → "API 키 만들기" → 키 복사<br>② 이 화면으로 돌아오면 <b>자동으로 입력</b>돼요 (안 되면 📋 붙여넣기)</p>
   <label>API 키 — 여러 개 넣어도 돼요 (한 줄에 하나). 종류는 자비스가 알아서 알아보고 상황에 맞게 배정하고, 막히면 다음 AI로 넘어가요. 이 폰에만 저장돼요.</label>
   <textarea id="keys" rows="4" placeholder="AIza... (Gemini)&#10;gsk_... (Groq)&#10;sk-... (ChatGPT)&#10;sk-ant-... (Claude)" autocomplete="off" spellcheck="false"></textarea>
@@ -249,9 +250,16 @@ const detect=k=>/^AIza/.test(k)?'gemini':/^gsk_/.test(k)?'groq':/^sk-ant-/.test(
 function keyMap(){const m={};String(cfg.keys||'').split(/[\s,;]+/).filter(Boolean).forEach(k=>{const p=detect(k);if(p&&!m[p])m[p]=k});return m}
 const hasKeys=()=>Object.keys(keyMap()).length>0;
 const cool={};                                   // 막힌 AI는 잠시 건너뜀
-function chain(fast){
+const PAID=['openai','claude'];                 // 돈이 드는 AI
+const paidKeys=()=>{const m=keyMap();return PAID.filter(p=>m[p])};
+const paidPrefer=t=>/클로드|claude/i.test(t||'')?'claude':/지피티|chatgpt|gpt/i.test(t||'')?'openai':null;   // 직접 지목 = 허락
+function paidBudgetOk(){try{const d=new Date().toISOString().slice(0,10),r=JSON.parse(localStorage.getItem('jarvis_paid')||'{}');return (r.d===d?r.n:0)<30}catch(_){return true}}
+function countPaid(){try{const d=new Date().toISOString().slice(0,10),r=JSON.parse(localStorage.getItem('jarvis_paid')||'{}');localStorage.setItem('jarvis_paid',JSON.stringify({d,n:(r.d===d?r.n:0)+1}))}catch(_){}}
+const needApproval=()=>{const e=new Error('approval');e.approval=true;return e};
+function chain(fast,allowPaid,prefer){
  const m=keyMap(),order=fast?['groq','gemini','openai','claude']:['gemini','groq','openai','claude'];
- const all=order.filter(p=>m[p]).map(p=>({prov:p,key:m[p],model:DEF[p]}));
+ const all=order.filter(p=>m[p]&&(allowPaid||!PAID.includes(p))).map(p=>({prov:p,key:m[p],model:DEF[p]}));
+ const i=prefer?all.findIndex(x=>x.prov===prefer):-1;if(i>0)all.unshift(all.splice(i,1)[0]);
  const ok=all.filter(x=>!(cool[x.prov]>Date.now()));
  return ok.length?ok:all;
 }
@@ -647,14 +655,16 @@ function makeStreamer(live){
   get bubble(){return bubble}
  };
 }
-async function generate(live,fast){
- const st=makeStreamer(live),list=chain(fast);let last=null;
- if(!list.length)throw new Error('AI 키가 없어요. 설정에서 무료 키를 넣어 주세요');
+async function generate(live,fast,allowPaid,prefer){
+ const st=makeStreamer(live),list=chain(fast,allowPaid,prefer);let last=null;
+ if(!list.length){if(!allowPaid&&paidKeys().length)throw needApproval();throw new Error('AI 키가 없어요. 설정에서 무료 키를 넣어 주세요')}
  try{
   for(const c of list){
    try{
+    if(PAID.includes(c.prov)){if(!paidBudgetOk())throw new Error('오늘 유료 AI 사용 한도(30회)를 다 썼어요');countPaid()}
     status('생각 중… ('+NAMES[c.prov]+')');
     await callProv(c.prov,c.key,c.model,d=>st.push(d));
+    if(!st.any)throw new Error('빈 응답');          // 내용이 없으면 실패로 보고 다음 AI 로
     last=null;break;
    }catch(e){
     last=e;
@@ -663,6 +673,7 @@ async function generate(live,fast){
    }
   }
  }finally{st.end()}
+ if(!st.text&&!allowPaid&&paidKeys().length)throw needApproval();   // 무료 AI 가 모두 실패 → 허락을 구함
  if(!st.text)throw last||new Error('빈 응답');
  return st;
 }
@@ -701,6 +712,33 @@ function applyPerf(){
  document.documentElement.classList.toggle('lite',!!lite);return !!lite;
 }
 applyPerf();buildHud();
+
+/* ---------- 유료 AI 사용 허락 ---------- */
+let pendingApprove=null;
+function askApproval(text,live){
+ return new Promise(res=>{
+  const box=document.createElement('div');box.className='card';box.style.flexWrap='wrap';
+  const b=document.createElement('b');b.textContent='💳 '+text;
+  const y=document.createElement('button');y.textContent='✅ 허락';
+  const n=document.createElement('button');n.className='ghost';n.textContent='❌ 안 함';
+  box.append(b,y,n);showCard(box);
+  let t=null;
+  const done=v=>{if(!pendingApprove)return;pendingApprove=null;clearTimeout(t);box.remove();res(v)};
+  t=setTimeout(()=>done(false),60000);
+  y.onclick=()=>done(true);n.onclick=()=>done(false);
+  pendingApprove=done;setSub('a',text);
+  if(live)say(text+' 허락하시면 "응", 아니면 "아니"라고 말씀해 주세요.');
+ });
+}
+async function genAsk(live,fast,ctx){
+ try{return await generate(live,fast,ctx.allow,ctx.prefer)}
+ catch(e){
+  if(!e.approval)throw e;
+  const names=paidKeys().map(p=>NAMES[p]).join(', ');
+  if(!await askApproval(`무료 AI를 쓸 수 없어요. 유료 ${names}로 답할까요? 비용이 들어요.`,live)){const d=new Error('declined');d.declined=true;throw d}
+  ctx.allow=true;return await generate(live,fast,true,ctx.prefer);
+ }
+}
 
 /* ---------- 대화 기록 영구 저장 (IndexedDB) ---------- */
 const IDB={
@@ -806,10 +844,10 @@ function doAction(name,a){
  }catch(e){note('동작 오류: '+e.message)}
 }
 /* 서버에 묻기: 요청 ID 로 중복 실행 방지, 끊기면 이어받기, 서버가 잠들어 있으면 기다림 */
-async function serverTurn(live){
+async function serverTurn(live,allowPaid){
  const base=serverBase(),rid=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2));
- const st=makeStreamer(live);let idx=0,final=null,err=null,resume=false;
- const body=JSON.stringify({request_id:rid,messages:history.slice(-24).map(m=>({role:m.role,content:m.content})),memories:mem,city:cfg.city,owner:cfg.owner});
+ const st=makeStreamer(live);let idx=0,final=null,err=null,resume=false,approvalMsg=null;
+ const body=JSON.stringify({request_id:rid,messages:history.slice(-24).map(m=>({role:m.role,content:m.content})),memories:mem,city:cfg.city,owner:cfg.owner,allow_paid:!!allowPaid});
  const handle=ev=>{
   if(ev.t==='delta')st.push(ev.x);
   else if(ev.t==='status'){status(ev.x);const m=/^도구 사용: (\w+)/.exec(ev.x||'');if(m)workStep(WORKLBL[m[1]])}
@@ -817,6 +855,7 @@ async function serverTurn(live){
   else if(ev.t==='action')doAction(ev.name,ev.args||{});
   else if(ev.t==='final')final=ev.x;
   else if(ev.t==='error')err=ev.x||'서버 오류';
+  else if(ev.t==='approval')approvalMsg=ev.x||'유료 AI로 답할까요?';
  };
  for(let attempt=0;;attempt++){
   try{
@@ -831,17 +870,21 @@ async function serverTurn(live){
    if(r.status===404&&resume){if(idx===0){resume=false;continue}throw new Error('서버가 다시 시작돼서 작업이 사라졌어요. 다시 말씀해 주세요')}
    if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||('서버 오류 '+r.status));
    await readEvents(r,ev=>{idx++;handle(ev)});
-   if(final!==null||err)break;
+   if(final!==null||err||approvalMsg)break;
    throw new Error('연결이 끊겼어요');
   }catch(e){
    if(e.auth)throw e;
-   if(final!==null||err)break;
+   if(final!==null||err||approvalMsg)break;
    if(attempt>=4||/다시 말씀|너무 많아요/.test(e.message||''))throw e;
    resume=true;status(`🔁 다시 연결하는 중… (${attempt+1}/4)`);await sleep(Math.min(8000,1000*2**attempt));
   }
  }
  st.end();
  if(err)throw new Error(err);
+ if(approvalMsg){                                   // 서버가 "유료 AI 써도 될까요?" 라고 물음
+  if(!await askApproval(approvalMsg,live)){const d=new Error('declined');d.declined=true;throw d}
+  return await serverTurn(live,true);
+ }
  const text=final||st.text;
  history.push({role:'assistant',content:text});
  if(!st.bubble)add('a',text);else{st.bubble.textContent=text;setSub('a',text)}
@@ -883,8 +926,9 @@ async function ask(text,opt={}){
     }
    }
    if(!served){
+    const ctx={prefer:paidPrefer(text)};ctx.allow=!!ctx.prefer;   // "클로드로" 라고 직접 말하면 허락으로 본다
     for(let i=0;i<4;i++){
-     const st=await generate(live,i>0);   // 도구 결과를 요약할 땐 가장 빠른 AI
+     const st=await genAsk(live,i>0,ctx);   // 도구 결과를 요약할 땐 가장 빠른 AI
      const tc=parseTool(st.text);
      if(!tc){final=st.text;history.push({role:'assistant',content:final});if(!st.bubble)add('a',final);if(live&&!st.spoke)say(final);break}
      status('도구 사용: '+tc.tool+'…');note('🔧 '+tc.tool+' '+JSON.stringify(tc.args||{}).slice(0,80));
@@ -897,7 +941,9 @@ async function ask(text,opt={}){
   }
   history=history.slice(-24);while(history.length&&history[0].role!=='user')history.shift();
  }catch(e){
-  history.length=base;good=false;final='오류가 발생했어요: '+e.message;add('a',final);if(live)say('오류가 발생했어요. 잠시 후 다시 말씀해 주세요.');
+  history.length=base;good=false;
+  if(e.declined){final='알겠어요. 유료 AI는 쓰지 않을게요.';add('a',final);if(live)say(final)}
+  else{final='오류가 발생했어요: '+e.message;add('a',final);if(live)say('오류가 발생했어요. 잠시 후 다시 말씀해 주세요.')}
  }
  if(good&&final)IDB.add('assistant',final);
  if(live)await drain();
@@ -926,6 +972,10 @@ function ackSay(){
  say(cfg.owner&&Math.random()<.4?`${cfg.owner}, 네?`:a[Math.floor(Math.random()*a.length)]);
 }
 async function heard(t){
+ if(pendingApprove&&t&&!speaking){      // 유료 AI 허락을 기다리는 중이면 "응/아니"만 듣는다
+  const x=t.trim(),yes=/^(응|네|예|그래|좋아|허락|써|해줘|맞아)/.test(x),no=/^(아니|아뇨|싫|괜찮|취소|됐|하지\s*마)/.test(x);
+  if(yes||no){pendingApprove(yes);return}
+ }
  if(!t||speaking||busy||Date.now()<ignoreUntil)return;
  const w=parseWake(t),convo=Date.now()<followUntil;
  if(w){

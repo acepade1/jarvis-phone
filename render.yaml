@@ -17,10 +17,12 @@ services:
         sync: false
       - key: GROQ_API_KEY        # console.groq.com 무료 (선택)
         sync: false
-      - key: OPENAI_API_KEY      # 선택
+      - key: OPENAI_API_KEY      # 선택 (유료 - 허락받고 쓸 때만 사용)
         sync: false
-      - key: ANTHROPIC_API_KEY   # 선택
+      - key: ANTHROPIC_API_KEY   # 선택 (유료 - 허락받고 쓸 때만 사용)
         sync: false
+      - key: PAID_DAILY_LIMIT    # 유료 AI(Claude/ChatGPT)를 하루에 최대 몇 번까지 쓸지
+        value: "30"
       - key: JARVIS_SECRET       # 로그인 토큰 서명용 - 자동 생성
         generateValue: true
       - key: CORS_ORIGINS        # 앱을 올려 둔 주소 (GitHub Pages / APK)

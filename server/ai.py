@@ -18,6 +18,8 @@ ENV_KEYS = {
     "claude": "ANTHROPIC_API_KEY",
 }
 NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "ChatGPT", "claude": "Claude"}
+# 돈이 드는 AI 는 사용자의 허락이 있을 때만 쓴다 (무료 AI 가 모두 막혔을 때 묻거나, 사용자가 직접 지목했을 때)
+PAID = {"openai", "claude"}
 
 _transport = None  # 테스트에서 httpx.MockTransport 를 넣는 자리
 _cooldown: dict[str, float] = {}
@@ -56,10 +58,39 @@ def model_for(prov: str) -> str:
     return os.environ.get(f"{prov.upper()}_MODEL", "").strip() or DEFAULT_MODELS[prov]
 
 
-def chain(fast: bool = False) -> list[str]:
+_paid_count = {"day": "", "n": 0}
+
+
+def paid_limit() -> int:
+    try:
+        return int(os.environ.get("PAID_DAILY_LIMIT", "30"))
+    except ValueError:
+        return 30
+
+
+def paid_budget_ok() -> bool:
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if _paid_count["day"] != today:
+        _paid_count.update(day=today, n=0)
+    return _paid_count["n"] < paid_limit()
+
+
+def count_paid() -> None:
+    _paid_count["n"] += 1
+
+
+def paid_available() -> list[str]:
+    keys = available()
+    return [p for p in ("claude", "openai") if p in keys]
+
+
+def chain(fast: bool = False, allow_paid: bool = False, prefer: str | None = None) -> list[str]:
     keys = available()
     order = ["groq", "gemini", "openai", "claude"] if fast else ["gemini", "groq", "openai", "claude"]
-    allp = [p for p in order if p in keys]
+    allp = [p for p in order if p in keys and (allow_paid or p not in PAID)]
+    if prefer in allp:  # 사용자가 "클로드로" 처럼 지목하면 그 AI 를 먼저
+        allp.remove(prefer)
+        allp.insert(0, prefer)
     now = time.time()
     ok = [p for p in allp if _cooldown.get(p, 0) <= now]
     return ok or allp

@@ -152,7 +152,7 @@ def build_system(req: "ChatBody") -> str:
 
 
 # ====================== 작업(Task) ======================
-TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
+TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "WAITING_APPROVAL"}
 TASK_TTL = 15 * 60
 
 
@@ -191,12 +191,17 @@ class Msg(BaseModel):
     content: str = Field(max_length=8000)
 
 
+class NeedApproval(Exception):
+    """무료 AI 로는 답할 수 없고, 유료 AI 를 쓰려면 사용자의 허락이 필요한 상황"""
+
+
 class ChatBody(BaseModel):
     request_id: str = Field(default_factory=lambda: uuid.uuid4().hex, max_length=80, pattern=r"^[\w.:-]+$")
     messages: list[Msg] = Field(min_length=1, max_length=60)
     memories: list[str] = []
     city: str = ""
     owner: str = ""
+    allow_paid: bool = False   # 사용자가 유료 AI 사용을 허락했을 때만 true
 
 
 _chat_hits: dict[str, list[float]] = {}
@@ -248,14 +253,22 @@ def parse_tool(text: str):
     return None
 
 
-async def generate(task: Task, system: str, msgs: list[dict], fast: bool) -> str:
+async def generate(task: Task, system: str, msgs: list[dict], fast: bool,
+                   allow_paid: bool = False, prefer: str | None = None) -> str:
     last: Exception | None = None
-    provs = ai.chain(fast)
+    provs = ai.chain(fast, allow_paid, prefer)
     if not provs:
-        raise RuntimeError("서버에 AI 키가 없어요. Render 환경변수에 GEMINI_API_KEY 등을 넣어 주세요")
+        if not allow_paid and ai.paid_available():
+            raise NeedApproval()
+        raise RuntimeError("서버에 AI 키가 없어요. Render 환경변수에 GROQ_API_KEY 나 GEMINI_API_KEY 를 넣어 주세요")
     for prov in provs:
         em = Emitter(task)
         try:
+            if prov in ai.PAID:
+                if not ai.paid_budget_ok():
+                    raise RuntimeError(f"오늘 유료 AI 사용 한도({ai.paid_limit()}회)를 다 썼어요")
+                ai.count_paid()
+                audit("paid_use", provider=prov)
             task.emit("status", f"생각 중… ({ai.NAMES[prov]})")
             async for chunk in ai.stream(prov, system, msgs):
                 em.feed(chunk)
@@ -270,6 +283,8 @@ async def generate(task: Task, system: str, msgs: list[dict], fast: bool) -> str
             audit("ai_fail", provider=prov, error=str(e)[:120])
             if em.mode == "text" and em.sent > 0:
                 return em.all.strip()  # 이미 말하기 시작했으면 중간 결과를 그대로 사용
+    if not allow_paid and ai.paid_available():
+        raise NeedApproval()  # 무료 AI 가 모두 실패 → 유료 AI 를 쓸지 사용자에게 물어봄
     raise last or RuntimeError("AI 응답 실패")
 
 
@@ -282,10 +297,13 @@ async def run_chat(task: Task, req: ChatBody):
             msgs.pop(0)
         last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user" and not m["content"].startswith("[도구결과]")), "")
         ctx = {"last_user": last_user, "city": req.city}
+        # "클로드로 해줘" 처럼 사용자가 직접 지목하면 그것이 허락이다
+        prefer = "claude" if re.search(r"클로드|claude", last_user, re.I) else ("openai" if re.search(r"지피티|chatgpt|gpt", last_user, re.I) else None)
+        allow_paid = req.allow_paid or bool(prefer)
         system = build_system(req)
         final = ""
         for i in range(4):
-            text = await generate(task, system, msgs, fast=i > 0)
+            text = await generate(task, system, msgs, fast=i > 0, allow_paid=allow_paid, prefer=prefer)
             call = parse_tool(text)
             if not call:
                 final = text
@@ -312,6 +330,12 @@ async def run_chat(task: Task, req: ChatBody):
         task.final = final
         task.emit("final", final)
         task.state = "COMPLETED"
+    except NeedApproval:
+        names = ", ".join(ai.NAMES[p] for p in ai.paid_available())
+        task.emit("approval", f"무료 AI를 쓸 수 없어요. 유료 {names}로 답할까요? 비용이 들어요.",
+                  providers=ai.paid_available())
+        task.state = "WAITING_APPROVAL"
+        audit("approval_needed", providers=ai.paid_available())
     except asyncio.CancelledError:
         task.state = "CANCELLED"
         task.emit("error", "취소됐어요")
