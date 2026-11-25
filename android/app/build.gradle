@@ -1,0 +1,36 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.acepade1.jarvis'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.acepade1.jarvis'
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+    signingConfigs {
+        release {
+            storeFile file(System.getenv('KS_FILE') ?: 'missing.p12')
+            storePassword System.getenv('KS_PASS') ?: ''
+            keyAlias 'jarvis'
+            keyPassword System.getenv('KS_PASS') ?: ''
+            storeType 'pkcs12'
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'com.google.androidbrowserhelper:androidbrowserhelper:2.5.0'
+}
