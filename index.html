@@ -41,7 +41,8 @@ button{background:var(--accent);color:#03121f;border:0;border-radius:12px;paddin
 button.ghost{background:var(--card);color:var(--fg);border:1px solid var(--line)}
 #bar{display:flex;gap:8px;width:100%;max-width:560px;margin-bottom:10px}
 #bar button{flex:1}
-#inst{display:none}
+#inst{display:block}
+#bar{flex-wrap:wrap}#bar #go{flex-basis:100%}
 dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:16px;width:min(92vw,440px);max-height:90vh;overflow:auto}
 dialog input,dialog select{width:100%;margin:4px 0 12px}
 label{font-size:13px;color:var(--dim)}
@@ -53,14 +54,20 @@ h4{margin:14px 0 6px;color:var(--accent)}
 <div id="clock">--:--</div>
 <div id="date"></div>
 <div id="orb" title="탭하면 말/영상 멈춤"></div>
-<div id="status">시작 버튼을 눌러 주세요</div>
+<div id="status">준비 중…</div>
 <div id="player"><div class="frame"></div><div class="row"><button class="ghost" id="pp">⏯ 일시정지/재생</button><button class="ghost" id="pc">✕ 닫기</button></div></div>
 <div id="log"></div>
 <div id="bar">
-  <button id="go">▶ 시작</button>
+  <button id="go">🎙 듣는 중</button>
   <button id="cfg" class="ghost">⚙ 설정</button>
   <button id="inst" class="ghost">📲 앱 설치</button>
 </div>
+
+<dialog id="idlg">
+  <h3 style="margin-top:0">📲 앱으로 설치</h3>
+  <p id="itxt" style="line-height:1.6;margin:0 0 12px"></p>
+  <div style="display:flex;gap:8px"><button id="iok">설치하기</button><button class="ghost" id="iclose" type="button">닫기</button></div>
+</dialog>
 
 <dialog id="dlg">
   <h3 style="margin-top:0">설정</h3>
@@ -159,7 +166,8 @@ $('save').onclick=()=>{
 };
 
 /* ---------- 음성 출력 (문장 단위 큐) ---------- */
-let voice=null,pend=0,speaking=false,waiters=[];
+let voice=null,pend=0,speaking=false,waiters=[],ttsBlocked=false;
+document.addEventListener('pointerdown',()=>{if(ttsBlocked){ttsBlocked=false;say('음성이 켜졌어요.')}});
 function pickVoice(){try{voice=speechSynthesis.getVoices().find(v=>v.lang&&v.lang.replace('_','-').startsWith('ko'))||null}catch(_){}}
 try{pickVoice();speechSynthesis.onvoiceschanged=pickVoice}catch(_){}
 const clean=t=>String(t).replace(/https?:\/\/\S+/g,' 링크 ').replace(/[*_#`>~|]/g,' ').replace(/\p{Extended_Pictographic}/gu,'').replace(/\s+/g,' ').trim();
@@ -169,7 +177,8 @@ function say(t){
  pend++;speaking=true;orb('talk');status('말하는 중…');
  let fin=false;
  const done=()=>{if(fin)return;fin=true;pend=Math.max(0,pend-1);if(!pend){speaking=false;ignoreUntil=Date.now()+700;const w=waiters;waiters=[];w.forEach(r=>r())}};
- u.onend=u.onerror=done;
+ u.onend=done;
+ u.onerror=e=>{if(e&&e.error==='not-allowed'){ttsBlocked=true;status('👆 화면을 한 번 터치하면 음성이 켜져요')}done()};
  setTimeout(done,Math.max(8000,t.length*400)); // 안전장치: 일부 기기에서 onend가 안 오는 경우
  try{speechSynthesis.speak(u)}catch(_){done()}
 }
@@ -514,7 +523,7 @@ function startRec(){
   rec=new SR();rec.lang='ko-KR';rec.continuous=true;rec.interimResults=false;
   rec.onstart=()=>{recRunning=true};
   rec.onend=()=>{recRunning=false};
-  rec.onerror=e=>{recRunning=false;if(e.error==='not-allowed'||e.error==='service-not-allowed'){active=false;$('go').textContent='▶ 시작';status('마이크 권한을 허용해 주세요')}};
+  rec.onerror=e=>{recRunning=false;if(e.error==='not-allowed'||e.error==='service-not-allowed'){active=false;$('go').textContent='🔇 꺼짐 (탭하면 켜기)';status('마이크 권한을 허용해 주세요')}};
   rec.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];if(r.isFinal)heard(r[0].transcript.trim())}};
   rec.start();
  }catch(_){recRunning=false}
@@ -620,30 +629,47 @@ function receiveFile(blob,name){
  note('📥 파일 받음: '+name);
 }
 
-/* ---------- 시작/정지 ---------- */
-$('go').onclick=async()=>{
- if(!active){
-  if(!cfg.key){$('cfg').click();return}
-  active=true;$('go').textContent='■ 정지';sleeping=false;followUntil=0;idle();
-  try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}
-  pickVoice();
-  say(`자비스 준비됐습니다${cfg.owner?', '+cfg.owner:''}.`);
-  if(cfg.mode==='clap'){await drain();followUntil=0;await startClap()}else startRec();
- }else{
-  active=false;$('go').textContent='▶ 시작';stopRec();stopClap();
-  try{wakeLock&&wakeLock.release()}catch(_){}
-  stopSpeech();idle();
- }
-};
+/* ---------- 자동 시작 / 음소거 ---------- */
+async function startApp(){
+ if(active)return;
+ if(!cfg.key){$('cfg').click();return}
+ active=true;$('go').textContent='🎙 듣는 중 (탭하면 끄기)';sleeping=false;followUntil=0;idle();
+ try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}
+ pickVoice();
+ say(`자비스 준비됐습니다${cfg.owner?', '+cfg.owner:''}.`);
+ if(cfg.mode==='clap'){await drain();followUntil=0;await startClap()}else startRec();
+}
+function stopApp(){
+ active=false;$('go').textContent='🔇 꺼짐 (탭하면 켜기)';stopRec();stopClap();
+ try{wakeLock&&wakeLock.release()}catch(_){}
+ stopSpeech();idle();
+}
+$('go').onclick=()=>active?stopApp():startApp();
 document.addEventListener('visibilitychange',async()=>{if(active&&document.visibilityState==='visible'){try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}}});
 window.addEventListener('beforeunload',()=>{try{speechSynthesis.cancel()}catch(_){}});
 /* ---------- 앱 설치 ---------- */
 let dip=null;
 const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone;
-window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();dip=e;if(!standalone){$('inst').style.display='block';if(/[?&]install/.test(location.search))note('👇 아래 "📲 앱 설치" 버튼을 눌러 설치하세요')}});
-$('inst').onclick=async()=>{if(!dip)return;dip.prompt();try{await dip.userChoice}catch(_){}dip=null;$('inst').style.display='none'};
-window.addEventListener('appinstalled',()=>{$('inst').style.display='none';note('✅ 앱이 설치됐어요. 홈 화면의 자비스 아이콘으로 열어 주세요')});
-if(!standalone&&/iphone|ipad/i.test(navigator.userAgent))note('아이폰은 Safari 하단의 공유 버튼 → "홈 화면에 추가"로 설치하세요');
+const isIOS=/iphone|ipad/i.test(navigator.userAgent);
+if(standalone)$('inst').style.display='none';
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();dip=e});
+window.addEventListener('appinstalled',()=>{$('inst').style.display='none';$('idlg').close();note('✅ 앱이 설치됐어요. 홈 화면의 자비스 아이콘으로 열어 주세요')});
+function openInstall(){
+ $('itxt').textContent=dip?'아래 "설치하기"를 누르면 홈 화면에 자비스 앱이 설치돼요.'
+  :isIOS?'아이폰: Safari 하단의 공유 버튼(□↑)을 누르고 "홈 화면에 추가"를 선택하세요.'
+  :'Chrome 오른쪽 위 메뉴(⋮)에서 "앱 설치" 또는 "홈 화면에 추가"를 선택하세요. (이미 설치했다면 홈 화면의 자비스 아이콘으로 여세요)';
+ $('iok').style.display=dip?'':'none';
+ $('idlg').showModal();
+}
+$('inst').onclick=openInstall;
+$('iclose').onclick=()=>$('idlg').close();
+$('iok').onclick=async()=>{if(!dip)return;dip.prompt();try{await dip.userChoice}catch(_){}dip=null;$('idlg').close()};
+window.addEventListener('load',()=>{
+ setTimeout(()=>{
+  if(!standalone&&/[?&]install/.test(location.search))openInstall();   // 설치 QR로 들어온 경우
+  else startApp();                                                     // 그 외에는 열자마자 자동으로 듣기 시작
+ },900);
+});
 tgLoop();
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
