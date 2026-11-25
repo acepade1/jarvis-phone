@@ -241,7 +241,10 @@ h4{margin:14px 0 6px;color:var(--accent)}
 'use strict';
 const $=id=>document.getElementById(id);
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const DEF={gemini:'gemini-2.5-flash',openai:'gpt-4o-mini',groq:'llama-3.3-70b-versatile',claude:'claude-haiku-5-5'};
+const DEF={gemini:'gemini-2.5-flash',openai:'gpt-4o-mini',groq:'openai/gpt-oss-120b',claude:'claude-haiku-5-5'};   // llama-3.3-70b 는 Groq 무료 플랜에서 빠짐
+const GROQ_ALTS=['openai/gpt-oss-120b','openai/gpt-oss-20b','qwen/qwen3.8-27b'];
+const groqExtra=m=>m.startsWith('openai/gpt-oss')?{reasoning_effort:'low'}:m.startsWith('qwen/')?{reasoning_effort:'none'}:{};
+let groqOk=null;
 let S={};try{S=JSON.parse(localStorage.getItem('jarvis')||'{}')}catch(_){}
 const cfg=Object.assign({work:'show',server:'',token:'',perf:'auto',keys:'',wake:'자비스',owner:'',city:'부산 해운대구',ytKey:'',tgToken:'',tgOwner:'',mode:'speech'},S);
 if(!cfg.keys)cfg.keys=[S.key,S.fbKey].filter(Boolean).join('\n');   // 예전 설정 이전
@@ -597,6 +600,15 @@ async function sse(r,cb){
 }
 async function errText(r){try{const j=await r.json();return (j.error&&j.error.message)||JSON.stringify(j).slice(0,200)}catch(_){return String(r.status)}}
 async function callProv(prov,key,model,onDelta){
+ if(prov!=='groq')return callOne(prov,key,model,onDelta);
+ const list=[...new Set([groqOk,model,...GROQ_ALTS].filter(Boolean))];
+ for(let i=0;i<list.length;i++){
+  let got=false;
+  try{await callOne(prov,key,list[i],d=>{got=true;onDelta(d)});groqOk=list[i];return}
+  catch(e){if(got||!/model/i.test(e.message||'')||i===list.length-1)throw e}   // 모델이 막혀 있으면 다음 모델로
+ }
+}
+async function callOne(prov,key,model,onDelta){
  const sys=system(),ac=new AbortController();
  let first=setTimeout(()=>ac.abort(),15000);          // 첫 응답 15초 제한
  const total=setTimeout(()=>ac.abort(),45000);         // 전체 45초 제한
@@ -614,7 +626,7 @@ async function callProv(prov,key,model,onDelta){
   }else if(prov==='openai'||prov==='groq'){
    const url=prov==='groq'?'https://api.groq.com/openai/v1/chat/completions':'https://api.openai.com/v1/chat/completions';
    r=await fetch(url,{method:'POST',signal:ac.signal,headers:{'content-type':'application/json',authorization:'Bearer '+key},
-    body:JSON.stringify({model,stream:true,max_completion_tokens:400,messages:[{role:'system',content:sys},...history]})});
+    body:JSON.stringify(Object.assign({model,stream:true,max_completion_tokens:prov==='groq'?800:400,messages:[{role:'system',content:sys},...history]},prov==='groq'?groqExtra(model):{}))});
    if(!r.ok)throw new Error(await errText(r));
    await sse(r,j=>{const d=j.choices&&j.choices[0]&&j.choices[0].delta;if(d&&d.content)got(d.content)});
   }else{
@@ -847,7 +859,7 @@ function doAction(name,a){
 async function serverTurn(live,allowPaid){
  const base=serverBase(),rid=(crypto.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random().toString(16).slice(2));
  const st=makeStreamer(live);let idx=0,final=null,err=null,resume=false,approvalMsg=null;
- const body=JSON.stringify({request_id:rid,messages:history.slice(-24).map(m=>({role:m.role,content:m.content})),memories:mem,city:cfg.city,owner:cfg.owner,allow_paid:!!allowPaid});
+ const body=JSON.stringify({request_id:rid,messages:history.slice(-16).map(m=>({role:m.role,content:m.content})),memories:mem.slice(-20),city:cfg.city,owner:cfg.owner,allow_paid:!!allowPaid});
  const handle=ev=>{
   if(ev.t==='delta')st.push(ev.x);
   else if(ev.t==='status'){status(ev.x);const m=/^도구 사용: (\w+)/.exec(ev.x||'');if(m)workStep(WORKLBL[m[1]])}

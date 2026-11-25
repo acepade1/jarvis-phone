@@ -16,6 +16,7 @@ for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
 from server import ai, main, tools  # noqa: E402
 
 CALLS = {"gemini": 0, "groq": 0, "claude": 0, "forecast": 0}
+CAPTURE = []   # groq 로 간 요청 본문들
 SCRIPT = {"gemini": [], "groq": []}  # 호출 순서대로 돌려줄 응답 (문자열 or ("err", status, msg))
 
 
@@ -51,6 +52,8 @@ def handler(request: httpx.Request):
     if "generativelanguage" in url or "api.groq.com" in url:
         prov = "gemini" if "generativelanguage" in url else "groq"
         CALLS[prov] += 1
+        if prov == "groq":
+            CAPTURE.append(json.loads(request.content))
         item = SCRIPT[prov].pop(0) if SCRIPT[prov] else "기본 응답이에요."
         if isinstance(item, tuple):
             return httpx.Response(item[1], json={"error": {"message": item[2] if len(item) > 2 else "error"}})
@@ -79,6 +82,8 @@ def setup():
     SCRIPT["gemini"].clear()
     SCRIPT["groq"].clear()
     ai._paid_count.update(day="", n=0)
+    ai._groq_ok["model"] = None
+    CAPTURE.clear()
     yield
     ai._transport = None
 
@@ -380,3 +385,94 @@ def test_without_paid_key_behaviour_unchanged(client):
     SCRIPT["groq"].append(("err", 500, "boom"))
     ev = events(client, login(client), chat_body("안녕"))
     assert ev[-1]["t"] == "error"
+
+
+# ---------------- Groq 무료 모델 / 모델 자동 전환 ----------------
+def test_groq_default_is_free_model_with_low_reasoning(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    SCRIPT["groq"].append("그록이 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "그록이 답했어요."
+    body = CAPTURE[0]
+    assert body["model"] == "openai/gpt-oss-120b", "llama-3.3-70b 는 무료 플랜에서 빠졌으므로 기본값이면 안 됨"
+    assert body["reasoning_effort"] == "low" and body["max_completion_tokens"] >= 800
+
+
+def test_groq_switches_model_when_model_unavailable(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    SCRIPT["groq"].append(("err", 404, "The model `openai/gpt-oss-120b` does not exist or you do not have access to it."))
+    SCRIPT["groq"].append("다음 모델이 답했어요.")
+    h = login(client)
+    ev = events(client, h, chat_body("안녕"))
+    assert ev[-1]["x"] == "다음 모델이 답했어요."
+    assert [c["model"] for c in CAPTURE] == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    # 동작한 모델을 기억해서 다음 요청은 바로 그 모델로
+    SCRIPT["groq"].append("또 답했어요.")
+    events(client, h, chat_body("또 안녕"))
+    assert CAPTURE[-1]["model"] == "openai/gpt-oss-20b" and len(CAPTURE) == 3
+
+
+def test_groq_non_model_error_does_not_try_other_models(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(main, "RETRY_429_WAIT", 0)
+    SCRIPT["groq"] += [("err", 429, "rate limit exceeded"), ("err", 429, "rate limit exceeded")]
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["t"] == "error"
+    assert {c["model"] for c in CAPTURE} == {"openai/gpt-oss-120b"}, "한도 오류일 때 다른 모델로 바꾸면 안 됨(모델 문제가 아니므로)"
+
+
+def test_groq_model_env_override_and_qwen_reasoning(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    SCRIPT["groq"].append("퀜이 답했어요.")
+    events(client, login(client), chat_body("안녕"))
+    assert CAPTURE[0]["model"] == "qwen/qwen3.8-27b" and CAPTURE[0]["reasoning_effort"] == "none"
+
+
+def test_request_size_is_capped(client):
+    seen = {}
+    orig = ai.stream
+
+    async def spy(prov, system, messages, max_tokens=400):
+        seen["n"] = len(messages)
+        seen["system"] = system
+        async for c in orig(prov, system, messages, max_tokens):
+            yield c
+
+    ai.stream = spy
+    try:
+        msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"메시지 {i}"} for i in range(40)]
+        msgs[-1] = {"role": "user", "content": "마지막 질문"}
+        SCRIPT["gemini"].append("답이에요.")
+        events(client, login(client), {"messages": msgs, "memories": [f"기억{i}" for i in range(50)]})
+    finally:
+        ai.stream = orig
+    assert seen["n"] <= 16, "AI 에 보내는 대화는 최근 16개까지만"
+    assert "기억49" in seen["system"] and "기억29" not in seen["system"], "기억은 최근 20개까지만"
+
+
+# ---------------- 분당 한도(429) 한 번 재시도 ----------------
+def test_single_provider_429_retries_once(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(main, "RETRY_429_WAIT", 0)
+    SCRIPT["groq"].append(("err", 429, "Rate limit reached for model: tokens per minute (TPM)"))
+    SCRIPT["groq"].append("다시 시도해서 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "다시 시도해서 답했어요." and CALLS["groq"] == 2
+    assert any(e["t"] == "status" and "바빠요" in e["x"] for e in ev)
+
+
+def test_429_with_two_providers_falls_through_without_waiting(client, monkeypatch):
+    monkeypatch.setattr(main, "RETRY_429_WAIT", 30)   # 기다리면 테스트가 멈추므로, 기다리지 않는 것을 증명
+    SCRIPT["gemini"].append(("err", 429, "quota"))
+    SCRIPT["groq"].append("그록이 바로 답했어요.")
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["x"] == "그록이 바로 답했어요."
+
+
+def test_single_provider_429_twice_gives_error(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(main, "RETRY_429_WAIT", 0)
+    SCRIPT["groq"] += [("err", 429, "rate limit"), ("err", 429, "rate limit")]
+    ev = events(client, login(client), chat_body("안녕"))
+    assert ev[-1]["t"] == "error" and CALLS["groq"] == 2

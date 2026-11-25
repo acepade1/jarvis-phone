@@ -7,7 +7,7 @@ import httpx
 
 DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
-    "groq": "llama-3.3-70b-versatile",
+    "groq": "openai/gpt-oss-120b",   # llama-3.3-70b 는 Groq 무료 플랜에서 빠짐(Enterprise 전용)
     "openai": "gpt-4o-mini",
     "claude": "claude-haiku-5-5",
 }
@@ -20,6 +20,10 @@ ENV_KEYS = {
 NAMES = {"gemini": "Gemini", "groq": "Groq", "openai": "ChatGPT", "claude": "Claude"}
 # 돈이 드는 AI 는 사용자의 허락이 있을 때만 쓴다 (무료 AI 가 모두 막혔을 때 묻거나, 사용자가 직접 지목했을 때)
 PAID = {"openai", "claude"}
+
+# Groq 무료 플랜에서 쓸 수 있는 모델들 (문서 기준). 앞 모델이 막혀 있으면 다음 모델로 자동 전환
+GROQ_ALTS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+_groq_ok: dict = {"model": None}
 
 _transport = None  # 테스트에서 httpx.MockTransport 를 넣는 자리
 _cooldown: dict[str, float] = {}
@@ -128,10 +132,43 @@ async def _fail(resp: httpx.Response) -> ProviderError:
     return ProviderError(resp.status_code, msg or "오류")
 
 
+def groq_extra(model: str) -> dict:
+    """추론(reasoning) 모델은 생각에 쓰는 토큰이 한도를 먹으므로 최소로 줄인다."""
+    env = os.environ.get("GROQ_REASONING", "").strip()
+    if model.startswith("openai/gpt-oss"):
+        return {"reasoning_effort": env or "low"}
+    if model.startswith("qwen/"):
+        return {"reasoning_effort": env or "none"}
+    return {}
+
+
 async def stream(prov: str, system: str, messages: list[dict], max_tokens: int = 400):
-    """텍스트 조각을 하나씩 내보내는 비동기 제너레이터."""
+    """텍스트 조각을 하나씩 내보내는 비동기 제너레이터. (Groq 는 모델이 막혀 있으면 다음 모델로)"""
+    if prov != "groq":
+        async for ch in _stream(prov, system, messages, max_tokens, model_for(prov)):
+            yield ch
+        return
+    models = [m for m in dict.fromkeys([_groq_ok["model"], model_for("groq"), *GROQ_ALTS]) if m]
+    last: ProviderError | None = None
+    for i, m in enumerate(models):
+        got = False
+        try:
+            async for ch in _stream(prov, system, messages, max_tokens, m):
+                got = True
+                yield ch
+            _groq_ok["model"] = m
+            return
+        except ProviderError as e:
+            last = e
+            bad_model = e.status in (400, 403, 404) and "model" in e.message.lower()
+            if got or not bad_model or i == len(models) - 1:
+                raise
+    if last:
+        raise last
+
+
+async def _stream(prov: str, system: str, messages: list[dict], max_tokens: int, model: str):
     key = available()[prov]
-    model = model_for(prov)
     async with client() as c:
         if prov == "gemini":
             gc: dict = {"maxOutputTokens": max_tokens}
@@ -163,9 +200,11 @@ async def stream(prov: str, system: str, messages: list[dict], max_tokens: int =
             body = {
                 "model": model,
                 "stream": True,
-                "max_completion_tokens": max_tokens,
+                "max_completion_tokens": max(max_tokens, 800) if prov == "groq" else max_tokens,
                 "messages": [{"role": "system", "content": system}, *messages],
             }
+            if prov == "groq":
+                body.update(groq_extra(model))
             async with c.stream("POST", url, json=body, headers={"Authorization": f"Bearer {key}"}) as r:
                 if r.status_code != 200:
                     raise await _fail(r)
