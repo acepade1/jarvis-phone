@@ -1130,7 +1130,7 @@ function receiveFile(blob,name){
 /* ---------- 자동 시작 / 음소거 ---------- */
 async function startApp(){
  if(active)return;
- if(!hasKeys()&&!serverOn()){$('cfg').click();note('👆 서버에 연결하거나 AI 키를 한 번만 넣어 주세요');return}
+ if(!hasKeys()&&!serverOn()){note('👆 서버에 연결하거나 AI 키를 한 번만 넣어 주세요');return}
  active=true;$('go').textContent='🎙';sleeping=false;followUntil=0;idle();
  try{wakeLock=await navigator.wakeLock.request('screen')}catch(_){}
  pickVoice();
